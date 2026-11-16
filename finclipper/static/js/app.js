@@ -139,8 +139,12 @@ function imageUrl(item, height) {
     return `${BASE}api/image/${item.id}?${params}`;
 }
 
+// Replace the page content. Like el(), arrays are flattened and null,
+// undefined and false are skipped. replaceChildren() does neither on its
+// own: it would print an array as "[object HTMLElement]" and null as "null".
 function show(...nodes) {
-    view.replaceChildren(...nodes);
+    const children = nodes.flat(Infinity).filter((node) => node !== null && node !== undefined && node !== false);
+    view.replaceChildren(...children);
 }
 
 function spinner() {
@@ -1173,7 +1177,12 @@ async function start() {
     document.getElementById("search-form").addEventListener("submit", (event) => {
         event.preventDefault();
         const query = document.getElementById("search-input").value.trim();
-        if (query) location.hash = `#/search?${new URLSearchParams({ q: query })}`;
+        if (!query) return;
+        const target = `#/search?${new URLSearchParams({ q: query })}`;
+        // Searching for the same thing again does not change the hash, so no
+        // hashchange event fires; re-run the route directly instead.
+        if (location.hash === target) route();
+        else location.hash = target;
     });
 
     document.getElementById("logout").addEventListener("click", async () => {
