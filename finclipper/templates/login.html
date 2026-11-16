@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Sign in - FinClipper{% endblock %}
+{% block body %}
+<div class="login-wrap">
+    <form class="login-card" id="login-form" autocomplete="on">
+        <div class="brand">
+            <img src="{{ url_for('static', filename='favicon.svg') }}" alt="">
+            <span>FinClipper</span>
+        </div>
+        <p class="muted" id="server-name">Sign in with your Jellyfin account</p>
+        <label class="field">
+            <span>Username</span>
+            <input type="text" name="username" autocomplete="username" required autofocus>
+        </label>
+        <label class="field">
+            <span>Password</span>
+            <input type="password" name="password" autocomplete="current-password">
+        </label>
+        <button class="btn primary" type="submit">Sign in</button>
+        <div class="login-error" id="login-error" role="alert"></div>
+    </form>
+</div>
+<script src="{{ url_for('static', filename='js/login.js') }}?v={{ version }}"></script>
+{% endblock %}

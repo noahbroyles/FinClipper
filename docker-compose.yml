@@ -1,0 +1,36 @@
+# Example compose file. Adjust JELLYFIN_URL, the media mount and the network
+# to match your Jellyfin setup (see README.md).
+services:
+  finclipper:
+    build: .
+    image: finclipper:latest
+    container_name: finclipper
+    restart: unless-stopped
+    # UID:GID that can read your media and write ./data.
+    user: "1000:1000"
+    ports:
+      - "8080:8080"
+    environment:
+      # How this container reaches Jellyfin. With a shared Docker network
+      # this is the Jellyfin container name.
+      JELLYFIN_URL: "http://jellyfin:8096"
+      # Only needed if the media is mounted at a different path here than in
+      # the Jellyfin container. Format: jellyfin_path=finclipper_path,...
+      # PATH_MAP: "/data/movies=/media/movies,/data/tv=/media/tv"
+      MAX_CLIP_SECONDS: "600"
+      MAX_CONCURRENT_JOBS: "2"
+      CLIP_RETENTION_HOURS: "24"
+    volumes:
+      - ./data:/data
+      # Mount your media read only, ideally at the same path Jellyfin uses.
+      - /srv/media:/media:ro
+    networks:
+      - jellyfin
+
+networks:
+  # The network your Jellyfin container is attached to. Find it with
+  # "docker network ls". Remove this block (and "networks:" above) if you
+  # reach Jellyfin through the host instead.
+  jellyfin:
+    external: true
+    name: jellyfin_default
