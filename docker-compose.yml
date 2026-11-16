@@ -2,6 +2,9 @@
 # to match your Jellyfin setup (see README.md).
 services:
   finclipper:
+    # Builds the image from this checkout. To use the image published by
+    # the GitHub workflow instead, remove "build" and set for example
+    # image: ghcr.io/<owner>/finclipper:latest
     build: .
     image: finclipper:latest
     container_name: finclipper
