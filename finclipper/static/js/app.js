@@ -19,6 +19,9 @@ const app = {
 const MP4_VIDEO_COPY = new Set(["h264", "hevc", "av1", "vp9", "mpeg4", "mpeg2video"]);
 const MP4_AUDIO_COPY = new Set(["aac", "mp3", "ac3", "eac3"]);
 
+// Longest clip name. Must match MAX_CLIP_NAME_LENGTH in finclipper/media.py.
+const CLIP_NAME_MAX = 100;
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -422,6 +425,9 @@ function createJobList(itemId, { showItemLink = false, emptyText = "No clips yet
     const element = el("div", { class: "jobs" });
     let jobs = [];
     let timer = 0;
+    // The clip whose name is being edited, as { id, value } (value is what
+    // has been typed so far), or null when no rename form is open.
+    let editing = null;
 
     function isActive(job) {
         return job.status === "queued" || job.status === "running";
@@ -454,6 +460,66 @@ function createJobList(itemId, { showItemLink = false, emptyText = "No clips yet
         await refresh();
     }
 
+    // Close the rename form and show the list as it is now.
+    function stopRename() {
+        editing = null;
+        render(true);
+        schedule();
+    }
+
+    function startRename(job) {
+        editing = { id: job.id, value: job.name };
+        render(true);
+        const input = element.querySelector(".job-rename input");
+        if (input) {
+            input.focus();
+            input.select();
+        }
+    }
+
+    // Inline form that replaces the title of the clip being renamed.
+    function renameForm(job) {
+        const input = el("input", {
+            type: "text",
+            maxlength: String(CLIP_NAME_MAX),
+            placeholder: job.title,
+            spellcheck: "false",
+            autocomplete: "off",
+            "aria-label": "Clip name",
+        });
+        input.value = editing.value;
+        input.addEventListener("input", () => (editing.value = input.value));
+        input.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                stopRename();
+            }
+        });
+        const save = el("button", { class: "btn small primary", type: "submit" }, "Save");
+        const form = el(
+            "form",
+            { class: "job-rename" },
+            input,
+            save,
+            el("button", { class: "btn small", type: "button", onclick: stopRename }, "Cancel"),
+        );
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            save.disabled = true;
+            try {
+                const updated = await api(`/clips/${job.id}/rename`, { method: "POST", body: { name: input.value } });
+                jobs = jobs.map((other) => (other.id === updated.id ? updated : other));
+            } catch (error) {
+                // Keep the form open so the typed name is not lost.
+                toast(error.message, true);
+                save.disabled = false;
+                return;
+            }
+            stopRename();
+        });
+        return form;
+    }
+
     function row(job) {
         const actions = [];
         if (job.status === "done") {
@@ -461,6 +527,7 @@ function createJobList(itemId, { showItemLink = false, emptyText = "No clips yet
                 el("a", { class: "btn small primary", href: `${BASE}api/clips/${job.id}/download`, download: job.filename }, "Download"),
             );
         }
+        actions.push(el("button", { class: "btn small", type: "button", onclick: () => startRename(job) }, "Rename"));
         if (isActive(job)) {
             actions.push(
                 el("button", {
@@ -478,10 +545,17 @@ function createJobList(itemId, { showItemLink = false, emptyText = "No clips yet
                 }, "Delete"),
             );
         }
+        // A named clip shows its name as the heading and the video title
+        // underneath; an unnamed clip just shows the video title.
+        const itemTitle = showItemLink ? el("a", { href: `#/item/${job.item_id}` }, job.title) : job.title;
+        let heading;
+        if (editing && editing.id === job.id) heading = renameForm(job);
+        else heading = el("div", { class: "job-title", title: job.name || job.title }, job.name || itemTitle);
         return el(
             "div",
             { class: "job" },
-            el("div", { class: "job-title", title: job.title }, showItemLink ? el("a", { href: `#/item/${job.item_id}` }, job.title) : job.title),
+            heading,
+            job.name ? el("div", { class: "job-meta job-item", title: job.title }, itemTitle) : null,
             el("div", { class: "job-meta mono" }, `${fmtTime(job.start)} → ${fmtTime(job.end)}  (${fmtRuntime(job.duration) || "0s"})`),
             el("div", { class: "job-meta" }, job.description),
             el("div", { class: `job-status ${job.status}` }, jobStatusText(job)),
@@ -490,7 +564,13 @@ function createJobList(itemId, { showItemLink = false, emptyText = "No clips yet
         );
     }
 
-    function render() {
+    // Rebuild the list. The once-a-second refresh skips this while focus is
+    // inside the rename form, because rebuilding would move the caret and
+    // blur the input mid-typing; force skips that check.
+    function render(force = false) {
+        if (!force && editing && document.activeElement && document.activeElement.closest(".job-rename")) return;
+        // Forget a rename whose clip has been deleted or has expired.
+        if (editing && !jobs.some((job) => job.id === editing.id)) editing = null;
         element.replaceChildren(...(jobs.length ? jobs.map(row) : [el("div", { class: "muted" }, emptyText)]));
     }
 
@@ -859,6 +939,14 @@ async function viewEditor(nav, itemId) {
     const heightSelect = el("select", {});
     const heightField = el("label", { class: "field hidden" }, el("span", {}, "Resolution"), heightSelect);
     const outputNote = el("p", { class: "output-note" });
+    // Optional clip name. Left empty, the clip is named after the video.
+    const nameInput = el("input", {
+        type: "text",
+        maxlength: String(CLIP_NAME_MAX),
+        placeholder: "Optional, defaults to the video title",
+        spellcheck: "false",
+        autocomplete: "off",
+    });
     const createButton = el("button", { class: "btn primary create", type: "button" }, "Create clip");
 
     function fillAudioOptions() {
@@ -976,9 +1064,12 @@ async function viewEditor(nav, itemId) {
                     mode: selectedMode(),
                     audio_index: ed.audioIndex,
                     max_height: selectedMode() === "precise" ? Number(heightSelect.value) : 0,
+                    name: nameInput.value,
                 },
             });
             jobList.add(job);
+            // Clear the name so the next clip does not reuse it by accident.
+            nameInput.value = "";
             toast("Clip queued. It will appear below when it is ready.");
         } catch (error) {
             toast(error.message, true);
@@ -1102,6 +1193,7 @@ async function viewEditor(nav, itemId) {
             ),
         ),
         heightField,
+        el("label", { class: "field" }, el("span", {}, "Clip name"), nameInput),
         outputNote,
         createButton,
     );

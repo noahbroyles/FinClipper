@@ -69,6 +69,26 @@ class TitleAndFilenameTests(unittest.TestCase):
     def test_clip_filename(self):
         self.assertEqual(media.clip_filename("Film: Part 2", 61, 75.5, "mp4"), "Film_ Part 2 [00.01.01-00.01.15].mp4")
 
+    def test_named_clip_filename(self):
+        # A name replaces the title and the time range, and is made file safe.
+        self.assertEqual(media.clip_filename("Film", 61, 75.5, "mkv", "Best bit: car/chase"), "Best bit_ car_chase.mkv")
+        # An empty name falls back to the default.
+        self.assertEqual(media.clip_filename("Film", 61, 75.5, "mp4", ""), "Film [00.01.01-00.01.15].mp4")
+
+    def test_clean_clip_name(self):
+        self.assertEqual(media.clean_clip_name(None), "")
+        self.assertEqual(media.clean_clip_name("   "), "")
+        # Control characters become spaces and whitespace collapses.
+        self.assertEqual(media.clean_clip_name("  Car\tchase\n\nscene  "), "Car chase scene")
+        self.assertEqual(media.clean_clip_name("x" * media.MAX_CLIP_NAME_LENGTH), "x" * media.MAX_CLIP_NAME_LENGTH)
+
+    def test_clean_clip_name_rejects_bad_values(self):
+        with self.assertRaises(ValueError):
+            media.clean_clip_name("x" * (media.MAX_CLIP_NAME_LENGTH + 1))
+        for value in (5, ["name"], {"name": "x"}, True):
+            with self.assertRaises(ValueError):
+                media.clean_clip_name(value)
+
 
 class StreamSelectionTests(unittest.TestCase):
     source = {

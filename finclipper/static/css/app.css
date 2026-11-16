@@ -626,6 +626,25 @@ kbd {
     color: var(--text-dim);
 }
 
+/* The video title under a named clip's heading. */
+.job-item {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Inline form that replaces the heading while a clip is renamed. */
+.job-rename {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.job-rename input {
+    flex: 1;
+    padding: 4px 8px;
+}
+
 .job-status {
     font-size: 13px;
     margin-top: 6px;

@@ -405,6 +405,10 @@ def create_clip():
         return bad_request("Invalid resolution")
     if max_height not in media.ALLOWED_HEIGHTS:
         return bad_request("Invalid resolution")
+    try:
+        name = media.clean_clip_name(data.get("name"))
+    except ValueError as exc:
+        return bad_request(str(exc))
     if mode == "fast":
         # Stream copy cannot resize.
         max_height = 0
@@ -499,10 +503,11 @@ def create_clip():
         end=end,
         mode=mode,
         description=description,
-        filename=media.clip_filename(title, start, end, plan["extension"]),
+        filename=media.clip_filename(title, start, end, plan["extension"], name),
         extension=plan["extension"],
         command=command,
         redacted_command=redacted,
+        name=name,
     )
     try:
         jobs().submit(job)
@@ -551,6 +556,25 @@ def cancel_clip(job_id):
     if owned_job(job_id) is None:
         return bad_request("Clip not found", 404)
     job = jobs().cancel(job_id, user_id())
+    return jsonify(job.to_dict())
+
+
+@api.post("/clips/<job_id>/rename")
+@login_required_api
+def rename_clip(job_id):
+    """Rename a clip. An empty name goes back to the default (the title)."""
+    job = owned_job(job_id)
+    if job is None:
+        return bad_request("Clip not found", 404)
+    try:
+        name = media.clean_clip_name((request.get_json(silent=True) or {}).get("name"))
+    except ValueError as exc:
+        return bad_request(str(exc))
+    filename = media.clip_filename(job.title, job.start, job.end, job.extension, name)
+    job = jobs().rename(job_id, user_id(), name, filename)
+    if job is None:
+        # Deleted or expired between the lookup and the rename.
+        return bad_request("Clip not found", 404)
     return jsonify(job.to_dict())
 
 

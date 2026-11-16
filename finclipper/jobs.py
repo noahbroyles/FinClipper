@@ -46,6 +46,8 @@ class Job:
     extension: str
     command: list
     redacted_command: list
+    # Optional name chosen by the user. "" means unnamed (the title is shown).
+    name: str = ""
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     status: str = QUEUED
     progress: float = 0.0
@@ -66,6 +68,7 @@ class Job:
             "id": self.id,
             "item_id": self.item_id,
             "title": self.title,
+            "name": self.name,
             "start": self.start,
             "end": self.end,
             "duration": self.duration,
@@ -166,6 +169,20 @@ class JobManager:
                 job.cancel_requested = True
                 if job.process is not None:
                     job.process.terminate()
+        return job
+
+    def rename(self, job_id, user_id, name, filename):
+        """Set a job's name and download file name. Returns the job or None.
+
+        The file on disk is named after the job id, so only the name shown
+        in the app and the name offered when downloading change.
+        """
+        job = self.get(job_id, user_id)
+        if job is None:
+            return None
+        with self._lock:
+            job.name = name
+            job.filename = filename
         return job
 
     def delete(self, job_id, user_id):

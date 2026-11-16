@@ -26,6 +26,9 @@ ALLOWED_HEIGHTS = {0, 2160, 1440, 1080, 720, 480, 360}
 # Characters that are not allowed in file names on common filesystems.
 _UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*]')
 
+# Longest name a user may give a clip. Must match CLIP_NAME_MAX in app.js.
+MAX_CLIP_NAME_LENGTH = 100
+
 # Accepts "SS", "SS.mmm", "MM:SS(.mmm)" and "HH:MM:SS(.mmm)".
 _TIMESTAMP = re.compile(r"^(?:(\d+):)?(?:(\d+):)?(\d+(?:\.\d+)?)$")
 
@@ -235,8 +238,32 @@ def safe_filename(name, max_length=150):
     return cleaned or "clip"
 
 
-def clip_filename(title, start, end, extension):
-    """Build "Title [HH.MM.SS-HH.MM.SS].ext" for the downloaded clip."""
+def clean_clip_name(value):
+    """Tidy a user supplied clip name, returning "" when there is none.
+
+    Control characters (tabs, newlines...) become spaces and runs of
+    whitespace collapse to one, so the name displays on a single line.
+    Raises ValueError if the value is not text or is too long.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("The clip name must be text")
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", value)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > MAX_CLIP_NAME_LENGTH:
+        raise ValueError(f"The clip name can be at most {MAX_CLIP_NAME_LENGTH} characters")
+    return cleaned
+
+
+def clip_filename(title, start, end, extension, name=""):
+    """Build the download file name for a clip.
+
+    A named clip is saved as "Name.ext". Otherwise the item title and the
+    time range are used: "Title [HH.MM.SS-HH.MM.SS].ext".
+    """
+    if name:
+        return f"{safe_filename(name)}.{extension}"
     span = f"{format_timestamp(start, '.', False)}-{format_timestamp(end, '.', False)}"
     return f"{safe_filename(title)} [{span}].{extension}"
 
