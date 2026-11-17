@@ -206,7 +206,7 @@ async function route() {
                 await viewHome(nav);
                 break;
             case "library":
-                await viewBrowse(nav, parts[1], params.get("kind") || "", params.get("name") || "");
+                await viewBrowse(nav, parts[1], params.get("kind") || "", params.get("name") || "", params.get("sort") || "");
                 break;
             case "series":
                 await viewSeries(nav, parts[1], params.get("season") || "");
@@ -302,8 +302,44 @@ async function viewHome(nav) {
     );
 }
 
-async function viewBrowse(nav, parentId, kind, name) {
+// Sort orders offered when browsing a library or folder, as [value, label].
+// A value is "<sort>-<order>", the sort and order parameters of /api/items.
+const BROWSE_SORTS = [
+    ["name-asc", "Name (A to Z)"],
+    ["name-desc", "Name (Z to A)"],
+    ["added-desc", "Date added (newest first)"],
+    ["added-asc", "Date added (oldest first)"],
+];
+const BROWSE_SORT_KEY = "finclipper.browseSort";
+
+// The sort last chosen while browsing, so other libraries open the same
+// way. Storage can be unavailable (private windows, blocked site data).
+function savedBrowseSort() {
+    try {
+        return localStorage.getItem(BROWSE_SORT_KEY) || "";
+    } catch {
+        return "";
+    }
+}
+
+function saveBrowseSort(value) {
+    try {
+        localStorage.setItem(BROWSE_SORT_KEY, value);
+    } catch {
+        // Not remembered; the choice still applies to this page.
+    }
+}
+
+function isBrowseSort(value) {
+    return BROWSE_SORTS.some(([option]) => option === value);
+}
+
+// sortParam is the "sort" value from the page address. Without one, the
+// last sort chosen is used, and name A to Z if there is none.
+async function viewBrowse(nav, parentId, kind, name, sortParam) {
     show(spinner());
+    const sort = [sortParam, savedBrowseSort()].find(isBrowseSort) || BROWSE_SORTS[0][0];
+    const [sortBy, sortOrder] = sort.split("-");
     const pageSize = 100;
     let loaded = 0;
     let grid = null;
@@ -313,7 +349,14 @@ async function viewBrowse(nav, parentId, kind, name) {
     const container = el("div");
 
     async function loadPage() {
-        const params = new URLSearchParams({ parent_id: parentId, kind, start: String(loaded), limit: String(pageSize) });
+        const params = new URLSearchParams({
+            parent_id: parentId,
+            kind,
+            sort: sortBy,
+            order: sortOrder,
+            start: String(loaded),
+            limit: String(pageSize),
+        });
         const data = await api(`/items?${params}`);
         if (!isCurrent(nav)) return;
         if (grid === null) {
@@ -340,9 +383,28 @@ async function viewBrowse(nav, parentId, kind, name) {
         }
     });
 
+    // Changing the sort puts it in the page address (so reloading keeps it)
+    // and loads the page again. replace() avoids a history entry per change,
+    // so Back still leaves the library.
+    const sortSelect = el(
+        "select",
+        { "aria-label": "Sort by" },
+        BROWSE_SORTS.map(([value, label]) => el("option", { value }, label)),
+    );
+    sortSelect.value = sort;
+    sortSelect.addEventListener("change", () => {
+        saveBrowseSort(sortSelect.value);
+        const params = new URLSearchParams({ kind, name, sort: sortSelect.value });
+        location.replace(`#/library/${encodeURIComponent(parentId)}?${params}`);
+    });
+
     await loadPage();
     if (!isCurrent(nav)) return;
-    show(el("div", { class: "page-head" }, el("h1", {}, name || "Library"), count), container, more);
+    show(
+        el("div", { class: "page-head" }, el("h1", {}, name || "Library"), count, el("label", { class: "sort" }, "Sort", sortSelect)),
+        container,
+        more,
+    );
 }
 
 async function viewSeries(nav, seriesId, seasonId) {

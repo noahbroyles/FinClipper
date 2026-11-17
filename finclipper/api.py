@@ -31,6 +31,10 @@ TOKEN_PARAMS = {"api_key", "apikey"}
 BROWSABLE_COLLECTIONS = {"movies", "tvshows", "homevideos", "musicvideos", "boxsets", "folders", None}
 # Item types returned by search.
 SEARCH_TYPES = "Movie,Series,Episode,Video,MusicVideo"
+# Sort orders offered when browsing a library or folder: the "sort" and
+# "order" query parameters mapped to Jellyfin's sortBy and sortOrder.
+BROWSE_SORTS = {"name": "SortName", "added": "DateCreated"}
+BROWSE_ORDERS = {"asc": "Ascending", "desc": "Descending"}
 # Largest subtitle track accepted from Jellyfin. Real tracks are far smaller.
 MAX_SUBTITLE_BYTES = 20 * 1024 * 1024
 # Most public clips listed at once (newest first). Each distinct video in
@@ -243,7 +247,13 @@ def libraries():
 @api.get("/items")
 @login_required_api
 def items():
-    """List a library or folder, or search everything when q is given."""
+    """List a library or folder, or search everything when q is given.
+
+    Libraries and folders are sorted by sort ("name" or "added", the date
+    the item was added to Jellyfin) in order ("asc" or "desc"). Missing or
+    unknown values fall back to name, ascending. Search results keep
+    Jellyfin's own order.
+    """
     params = {
         "userId": user_id(),
         "fields": "PrimaryImageAspectRatio",
@@ -261,13 +271,23 @@ def items():
         if not ID_RE.match(parent_id):
             return bad_request("Invalid parent id")
         params["parentId"] = parent_id
+        sort_by = [BROWSE_SORTS.get(request.args.get("sort"), "SortName")]
+        sort_order = [BROWSE_ORDERS.get(request.args.get("order"), "Ascending")]
+        if sort_by[0] != "SortName":
+            # Items added in the same scan can share a date. Break ties by
+            # name so the order, and so paging with start, stays stable.
+            sort_by.append("SortName")
+            sort_order.append("Ascending")
         if kind == "movies":
-            params.update(recursive="true", includeItemTypes="Movie", sortBy="SortName")
+            params.update(recursive="true", includeItemTypes="Movie")
         elif kind == "tvshows":
-            params.update(recursive="true", includeItemTypes="Series", sortBy="SortName")
+            params.update(recursive="true", includeItemTypes="Series")
         else:
-            # Plain folder view: folders first, then files, both by name.
-            params.update(sortBy="IsFolder,SortName", sortOrder="Descending,Ascending")
+            # Plain folder view: folders first, then files, both in the
+            # chosen order.
+            sort_by.insert(0, "IsFolder")
+            sort_order.insert(0, "Descending")
+        params.update(sortBy=",".join(sort_by), sortOrder=",".join(sort_order))
     return list_response(jellyfin_client().get_json("/Items", params=params))
 
 

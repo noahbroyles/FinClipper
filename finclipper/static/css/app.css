@@ -241,6 +241,21 @@ main {
     margin: 0;
 }
 
+/* Sort menu at the right end of a library's heading. */
+.sort {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-left: auto;
+    color: var(--text-dim);
+    font-size: 14px;
+}
+
+/* Selects inherit the label's color, so set the normal text color back. */
+.sort select {
+    color: var(--text);
+}
+
 .grid {
     display: grid;
     gap: 18px;

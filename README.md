@@ -7,7 +7,7 @@ It is written in Python with Flask, and is meant to run as a Docker container on
 ## Features
 
 - Sign in with your existing Jellyfin username and password. FinClipper only shows what your Jellyfin account can see.
-- Browse libraries, shows and seasons, or search across everything.
+- Browse libraries, shows and seasons, or search across everything. Libraries and folders can be sorted by name or by date added, in either direction, and the last choice is remembered.
 - Preview player with a draggable range timeline, millisecond time inputs, nudge buttons and keyboard shortcuts.
 - Two clip modes:
   - **Fast** copies the original streams without re-encoding. It takes seconds and keeps full quality, but the cut has to begin on a keyframe. In MP4 output an edit list hides the extra frames, so most players still start exactly on your start point.
