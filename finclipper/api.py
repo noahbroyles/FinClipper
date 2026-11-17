@@ -33,6 +33,9 @@ BROWSABLE_COLLECTIONS = {"movies", "tvshows", "homevideos", "musicvideos", "boxs
 SEARCH_TYPES = "Movie,Series,Episode,Video,MusicVideo"
 # Largest subtitle track accepted from Jellyfin. Real tracks are far smaller.
 MAX_SUBTITLE_BYTES = 20 * 1024 * 1024
+# Most public clips listed at once (newest first). Each distinct video in
+# the list costs one Jellyfin lookup to check the viewer may see it.
+MAX_PUBLIC_CLIPS = 100
 
 
 # ----- request hooks and error handling -------------------------------------
@@ -213,6 +216,10 @@ def me():
         is_admin=session.get("is_admin", False),
         can_clip=can_clip(),
         max_clip_seconds=config["MAX_CLIP_SECONDS"],
+        # How long finished clips are kept, and public ones (0: until they
+        # are made private).
+        clip_retention_hours=config["CLIP_RETENTION_HOURS"],
+        public_clip_retention_hours=config["PUBLIC_CLIP_RETENTION_HOURS"],
         # Looks offered for burned-in text subtitles, in display order.
         subtitle_styles=[{"id": key, "label": style["label"]} for key, style in media.SUBTITLE_STYLES.items()],
     )
@@ -600,6 +607,7 @@ def create_clip():
         command=command,
         redacted_command=redacted,
         name=name,
+        owner_name=session.get("user_name") or "",
         prepare=prepare,
     )
     try:
@@ -679,6 +687,18 @@ def delete_clip(job_id):
     return Response(status=204)
 
 
+def send_clip(job, inline=False):
+    """Send a finished clip's file, as a download or (inline) for a player.
+
+    send_file answers Range requests, so a <video> element can seek.
+    """
+    path = jobs().output_path(job)
+    if not path.is_file():
+        return bad_request("The clip file has expired", 410)
+    mimetype = "video/mp4" if job.extension == "mp4" else "video/x-matroska"
+    return send_file(path, mimetype=mimetype, as_attachment=not inline, download_name=job.filename, max_age=0)
+
+
 @api.get("/clips/<job_id>/download")
 @login_required_api
 def download_clip(job_id):
@@ -687,8 +707,82 @@ def download_clip(job_id):
         return bad_request("Clip not found", 404)
     if job.status != DONE:
         return bad_request("This clip is not ready", 409)
-    path = jobs().output_path(job)
-    if not path.is_file():
-        return bad_request("The clip file has expired", 410)
-    mimetype = "video/mp4" if job.extension == "mp4" else "video/x-matroska"
-    return send_file(path, mimetype=mimetype, as_attachment=True, download_name=job.filename, max_age=0)
+    return send_clip(job)
+
+
+# ----- public clips ----------------------------------------------------------
+
+
+def visible_item_ids(item_ids):
+    """Return the ids in item_ids that the signed in user can see in Jellyfin.
+
+    A public clip is only shown to users who could watch the video it was
+    cut from, so sharing never reveals a library someone has no access to
+    or goes past their parental rating limit. This uses the same lookup as
+    creating a clip: Jellyfin answers 404 for items the user cannot see.
+    """
+    client = jellyfin_client()
+    visible = set()
+    for item_id in item_ids:
+        try:
+            client.get_json(f"/Items/{item_id}", params={"userId": user_id()})
+        except JellyfinError as exc:
+            if exc.status in (403, 404):
+                continue
+            # Anything else (Jellyfin down, session expired) is a real error.
+            raise
+        visible.add(item_id)
+    return visible
+
+
+@api.post("/clips/<job_id>/public")
+@login_required_api
+def set_clip_public(job_id):
+    """Share a finished clip with other users, or stop sharing it.
+
+    The owner can do both. Administrators can also stop sharing anyone's
+    clip, to take down something that should not be public.
+    """
+    public = (request.get_json(silent=True) or {}).get("public")
+    if not isinstance(public, bool):
+        return bad_request("public must be true or false")
+    if not JOB_ID_RE.match(job_id):
+        return bad_request("Clip not found", 404)
+    try:
+        job = jobs().set_public(job_id, public, user_id())
+        if job is None and not public and session.get("is_admin"):
+            job = jobs().set_public(job_id, False)
+    except ValueError as exc:
+        return bad_request(str(exc), 409)
+    if job is None:
+        return bad_request("Clip not found", 404)
+    current_app.logger.info(
+        "User %s made clip %s %s", session.get("user_name"), job.id, "public" if public else "private"
+    )
+    return jsonify(job.to_dict() if job.user_id == user_id() else job.to_public_dict(user_id()))
+
+
+@api.get("/public-clips")
+@login_required_api
+def list_public_clips():
+    """Public clips from all users, limited to videos this user can see."""
+    shared = jobs().list_public(MAX_PUBLIC_CLIPS)
+    visible = visible_item_ids({job.item_id for job in shared})
+    viewer = user_id()
+    return jsonify(
+        items=[job.to_public_dict(viewer) for job in shared if job.item_id in visible],
+        # Watching a clip is downloading it, so the same permission applies.
+        can_download=can_clip(),
+    )
+
+
+@api.get("/public-clips/<job_id>/download")
+@login_required_api
+def download_public_clip(job_id):
+    """Download a public clip, or with ?inline=1 serve it to a player."""
+    job = jobs().get_public(job_id) if JOB_ID_RE.match(job_id) else None
+    if job is None or not visible_item_ids({job.item_id}):
+        return bad_request("Clip not found", 404)
+    if not can_clip():
+        return bad_request("Your Jellyfin account is not allowed to download media.", 403)
+    return send_clip(job, inline=request.args.get("inline") == "1")

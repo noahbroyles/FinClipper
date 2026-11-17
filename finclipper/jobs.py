@@ -1,8 +1,15 @@
 """Background clip jobs.
 
-Jobs live in memory, so the app must run as a single process (gunicorn with
-one worker and several threads). A fixed pool of worker threads takes jobs
-from a queue, which caps how many ffmpeg processes run at the same time.
+Clip records are stored in SQLite (see store.py) and survive restarts. A
+fixed pool of worker threads takes jobs from an in-memory queue, which caps
+how many ffmpeg processes run at the same time. Because that queue and the
+running processes live in this process, the app must still run as a single
+process (gunicorn with one worker and several threads).
+
+Jobs that are queued or running are also kept in memory with their runtime
+state (ffmpeg process, progress, the prepare step). Every change of status
+is written to the database at the same time, under the same lock, so the
+in-memory copy and the database never disagree about a job.
 """
 
 import os
@@ -24,7 +31,11 @@ RUNNING = "running"
 DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
-ACTIVE_STATES = {QUEUED, RUNNING}
+ACTIVE_STATES = (QUEUED, RUNNING)
+
+# Clip files are "<id>.<extension>"; these suffixes are only used while a
+# clip is being made, so any left at startup belong to interrupted jobs.
+WORK_SUFFIXES = (".part", ".ass")
 
 
 class JobLimitError(Exception):
@@ -33,7 +44,7 @@ class JobLimitError(Exception):
 
 @dataclass
 class Job:
-    """One clip request and its progress."""
+    """One clip: its stored record plus, while it is being made, its progress."""
 
     user_id: str
     item_id: str
@@ -44,10 +55,15 @@ class Job:
     description: str
     filename: str
     extension: str
-    command: list
-    redacted_command: list
+    # The ffmpeg command, and a copy with the Jellyfin token hidden for logs.
+    # Only known for jobs created by this process; never stored, because it
+    # can contain the user's token.
+    command: list = field(default_factory=list)
+    redacted_command: list = field(default_factory=list)
     # Optional name chosen by the user. "" means unnamed (the title is shown).
     name: str = ""
+    # Jellyfin name of the user who made the clip, shown on public clips.
+    owner_name: str = ""
     # Optional function run by the worker before ffmpeg starts (for example
     # to download subtitles). If it raises, the job fails with its message.
     prepare: object = None
@@ -63,13 +79,97 @@ class Job:
     finished: float = 0.0
     cancel_requested: bool = False
     process: object = None
+    # Whether other signed in users can see the clip under "Public clips",
+    # when it was shared (sorts that list, newest first) and when it was
+    # last made private (private clips expire counting from then).
+    public: bool = False
+    shared_at: float = 0.0
+    unshared_at: float = 0.0
 
     @property
     def duration(self):
         return self.end - self.start
 
+    def to_record(self):
+        """The columns stored in the database for this job."""
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "owner_name": self.owner_name,
+            "item_id": self.item_id,
+            "title": self.title,
+            "name": self.name,
+            "start_time": self.start,
+            "end_time": self.end,
+            "mode": self.mode,
+            "description": self.description,
+            "filename": self.filename,
+            "extension": self.extension,
+            "status": self.status,
+            "error": self.error,
+            "size": self.size,
+            "created": self.created,
+            "finished": self.finished,
+            "public": int(self.public),
+            "shared_at": self.shared_at,
+            "unshared_at": self.unshared_at,
+        }
+
+    @classmethod
+    def from_record(cls, row):
+        """Rebuild a job from a database row (without any runtime state)."""
+        return cls(
+            id=row["id"],
+            user_id=row["user_id"],
+            owner_name=row["owner_name"],
+            item_id=row["item_id"],
+            title=row["title"],
+            name=row["name"],
+            start=row["start_time"],
+            end=row["end_time"],
+            mode=row["mode"],
+            description=row["description"],
+            filename=row["filename"],
+            extension=row["extension"],
+            status=row["status"],
+            error=row["error"],
+            size=row["size"],
+            created=row["created"],
+            finished=row["finished"],
+            public=bool(row["public"]),
+            shared_at=row["shared_at"],
+            unshared_at=row["unshared_at"],
+            # Only finished jobs are read back from the database.
+            progress=1.0 if row["status"] == DONE else 0.0,
+        )
+
+    def to_public_dict(self, viewer_id):
+        """View of a public clip for any signed in user.
+
+        Leaves out what only the owner needs (status, errors, progress) and
+        says whether the viewer is the owner, so the page can offer them
+        the "Make private" button.
+        """
+        return {
+            "id": self.id,
+            "item_id": self.item_id,
+            "title": self.title,
+            "name": self.name,
+            "owner_name": self.owner_name,
+            "mine": self.user_id == viewer_id,
+            "start": self.start,
+            "end": self.end,
+            "duration": self.duration,
+            "description": self.description,
+            "filename": self.filename,
+            # Browsers can play MP4 but usually not MKV.
+            "playable": self.extension == "mp4",
+            "size": self.size,
+            "shared_at": self.shared_at,
+        }
+
     def to_dict(self):
-        """Public view of the job for the JSON API (no paths or commands)."""
+        """Owner's view of the job for the JSON API (no paths or commands)."""
         return {
             "id": self.id,
             "item_id": self.item_id,
@@ -82,6 +182,7 @@ class Job:
             "description": self.description,
             "filename": self.filename,
             "status": self.status,
+            "public": self.public,
             "phase": self.phase,
             "progress": round(self.progress, 4),
             "error": self.error,
@@ -92,14 +193,18 @@ class Job:
 
 
 class JobManager:
-    """Queues clip jobs and runs ffmpeg for them in worker threads."""
+    """Queues clip jobs, runs ffmpeg for them and keeps their records."""
 
-    def __init__(self, clips_dir, max_concurrent, max_per_user, retention_hours):
+    def __init__(self, clips_dir, store, max_concurrent, max_per_user, retention_hours, public_retention_hours=0):
         self.clips_dir = Path(clips_dir)
+        self.store = store
         self.max_concurrent = max_concurrent
         self.max_per_user = max_per_user
         self.retention_seconds = retention_hours * 3600
-        self._jobs = {}
+        # 0 means public clips are kept until they are made private.
+        self.public_retention_seconds = public_retention_hours * 3600
+        # Queued and running jobs, with their runtime state.
+        self._active = {}
         self._lock = threading.Lock()
         self._queue = queue.Queue()
         self._started = False
@@ -107,76 +212,102 @@ class JobManager:
     # ----- lifecycle -------------------------------------------------------
 
     def start(self):
-        """Clean leftovers from a previous run and start the worker threads."""
+        """Tidy up after the previous run and start the worker threads."""
         if self._started:
             return
         self._started = True
-        self._purge_orphans()
+        self.recover()
         for number in range(self.max_concurrent):
             threading.Thread(target=self._worker, name=f"clip-worker-{number}", daemon=True).start()
         threading.Thread(target=self._janitor, name="clip-janitor", daemon=True).start()
 
-    def _purge_orphans(self):
-        """Delete clip files left over from before a restart.
+    def recover(self):
+        """Make the database and the clips directory agree after a restart.
 
-        Jobs are kept in memory only, so files from a previous process can
-        never be downloaded again and would just waste disk space.
+        Jobs that were queued or running are marked as interrupted, work
+        files they left (.part, .ass) and files without a record are
+        deleted, and records of finished clips whose file is missing are
+        dropped, since they could never be downloaded.
         """
+        interrupted = self.store.mark_interrupted(ACTIVE_STATES, FAILED, time.time())
+        if interrupted:
+            log.info("Marked %d clip(s) interrupted by the restart as failed", interrupted)
+        known = self.store.ids()
         for path in self.clips_dir.iterdir():
-            if path.is_file():
+            if not path.is_file():
+                continue
+            if path.suffix in WORK_SUFFIXES or path.name.split(".", 1)[0] not in known:
                 try:
                     path.unlink()
+                    log.info("Removed leftover file %s", path.name)
                 except OSError:
                     log.warning("Could not remove leftover file %s", path)
+        for row in self.store.list_by_status(DONE):
+            job = Job.from_record(row)
+            if not self.output_path(job).is_file():
+                self.store.delete(job.id)
+                log.warning("Dropped clip %s because its file is missing", job.id)
 
     # ----- public API ------------------------------------------------------
 
     def submit(self, job):
-        """Queue a job, enforcing the per-user active job limit."""
+        """Store and queue a job, enforcing the per-user active job limit."""
         with self._lock:
-            active = sum(
-                1
-                for other in self._jobs.values()
-                if other.user_id == job.user_id and other.status in ACTIVE_STATES
-            )
+            active = sum(1 for other in self._active.values() if other.user_id == job.user_id)
             if active >= self.max_per_user:
                 raise JobLimitError(
                     f"You already have {active} clips in progress. Wait for one to finish."
                 )
-            self._jobs[job.id] = job
+            self.store.insert(job.to_record())
+            self._active[job.id] = job
         log.info("Queued job %s: %s", job.id, " ".join(job.redacted_command))
         self._queue.put(job.id)
         return job
 
+    def _find_locked(self, job_id):
+        """The live job if it is active, else a copy from the database, or None.
+
+        The caller must hold self._lock, so a job cannot finish (and move
+        from memory to the database only) half way through the lookup.
+        """
+        job = self._active.get(job_id)
+        if job is not None:
+            return job
+        row = self.store.get(job_id)
+        return Job.from_record(row) if row else None
+
     def get(self, job_id, user_id):
         """Return a job owned by user_id, or None."""
         with self._lock:
-            job = self._jobs.get(job_id)
+            job = self._find_locked(job_id)
         if job is None or job.user_id != user_id:
             return None
         return job
 
     def list(self, user_id):
-        """All jobs of a user, newest first."""
+        """All jobs of a user, newest first, with live progress for active ones."""
         with self._lock:
-            jobs = [job for job in self._jobs.values() if job.user_id == user_id]
-        return sorted(jobs, key=lambda job: job.created, reverse=True)
+            rows = self.store.list_for_user(user_id)
+            active = dict(self._active)
+        return [active.get(row["id"]) or Job.from_record(row) for row in rows]
 
     def cancel(self, job_id, user_id):
-        """Cancel a queued or running job. Returns the job or None."""
-        job = self.get(job_id, user_id)
-        if job is None:
-            return None
+        """Cancel a queued or running job. Returns the job or None.
+
+        Finished jobs are returned unchanged.
+        """
         with self._lock:
-            if job.status == QUEUED:
-                # The worker will see the final state and skip it.
-                job.status = CANCELLED
-                job.finished = time.time()
-            elif job.status == RUNNING:
-                job.cancel_requested = True
-                if job.process is not None:
-                    job.process.terminate()
-        return job
+            job = self._active.get(job_id)
+            if job is not None and job.user_id == user_id:
+                if job.status == QUEUED:
+                    # The worker will find it gone from the active jobs and skip it.
+                    self._finish_locked(job, CANCELLED, "")
+                elif job.status == RUNNING:
+                    job.cancel_requested = True
+                    if job.process is not None:
+                        job.process.terminate()
+                return job
+        return self.get(job_id, user_id)
 
     def rename(self, job_id, user_id, name, filename):
         """Set a job's name and download file name. Returns the job or None.
@@ -184,13 +315,49 @@ class JobManager:
         The file on disk is named after the job id, so only the name shown
         in the app and the name offered when downloading change.
         """
-        job = self.get(job_id, user_id)
-        if job is None:
-            return None
         with self._lock:
+            job = self._find_locked(job_id)
+            if job is None or job.user_id != user_id:
+                return None
+            self.store.update(job_id, name=name, filename=filename)
+            # Also updates the live copy of an active job.
             job.name = name
             job.filename = filename
         return job
+
+    def set_public(self, job_id, public, user_id=None):
+        """Share or stop sharing a clip. Returns the job or None.
+
+        Only the owner may change a clip, unless user_id is None, which
+        skips the owner check (administrators taking a clip down). Raises
+        ValueError when sharing a clip that is not finished.
+        """
+        with self._lock:
+            job = self._find_locked(job_id)
+            if job is None or (user_id is not None and job.user_id != user_id):
+                return None
+            if public and job.status != DONE:
+                raise ValueError("Only finished clips can be made public")
+            if public != job.public:
+                now = time.time()
+                job.public = public
+                if public:
+                    job.shared_at = now
+                else:
+                    job.shared_at, job.unshared_at = 0.0, now
+                self.store.update(job_id, public=int(public), shared_at=job.shared_at, unshared_at=job.unshared_at)
+        return job
+
+    def get_public(self, job_id):
+        """Return a finished public job, or None."""
+        row = self.store.get(job_id)
+        if row is None or not row["public"] or row["status"] != DONE:
+            return None
+        return Job.from_record(row)
+
+    def list_public(self, limit):
+        """Finished public jobs, most recently shared first."""
+        return [Job.from_record(row) for row in self.store.list_public(DONE, limit)]
 
     def delete(self, job_id, user_id):
         """Cancel (if needed) and forget a job, removing its file."""
@@ -198,7 +365,11 @@ class JobManager:
         if job is None:
             return False
         with self._lock:
-            self._jobs.pop(job.id, None)
+            # A running job stays with its worker until ffmpeg has stopped;
+            # finishing it then updates a row that no longer exists, which
+            # does nothing.
+            self._active.pop(job.id, None)
+            self.store.delete(job.id)
         self._remove_files(job)
         return True
 
@@ -237,11 +408,12 @@ class JobManager:
             job_id = self._queue.get()
             try:
                 with self._lock:
-                    job = self._jobs.get(job_id)
+                    job = self._active.get(job_id)
                     if job is None or job.status != QUEUED:
                         # Deleted or cancelled while waiting in the queue.
                         continue
                     job.status = RUNNING
+                    self.store.update(job.id, status=RUNNING)
                 self._run(job)
             except Exception:
                 log.exception("Unexpected error in clip worker")
@@ -258,12 +430,15 @@ class JobManager:
                 self.subtitle_path(job).unlink(missing_ok=True)
             except OSError:
                 log.warning("Could not remove %s", self.subtitle_path(job))
+            if job.status in ACTIVE_STATES:
+                # An unexpected error escaped before the job was finished.
+                self._finish(job, FAILED, "Unexpected error while making the clip")
 
     def _run_ffmpeg(self, job):
         if job.prepare is not None:
             job.phase = "preparing"
             # Taken off the job so whatever it holds (such as the user's
-            # Jellyfin client and token) is not kept until the job expires.
+            # Jellyfin client and token) is not kept in memory any longer.
             prepare, job.prepare = job.prepare, None
             try:
                 prepare()
@@ -320,6 +495,12 @@ class JobManager:
 
         return_code = process.wait()
         stderr_thread.join(timeout=5)
+        # Close the pipes now rather than leaving them to the garbage
+        # collector. stderr is left alone in the unlikely case that its
+        # reader thread is still running, since closing it would break it.
+        process.stdout.close()
+        if not stderr_thread.is_alive():
+            process.stderr.close()
 
         with self._lock:
             job.process = None
@@ -346,9 +527,31 @@ class JobManager:
 
     def _finish(self, job, status, error):
         with self._lock:
-            job.status = status
-            job.error = error
-            job.finished = time.time()
+            self._finish_locked(job, status, error)
+
+    def _finish_locked(self, job, status, error):
+        """Record a final state; from now on the job lives only in the database."""
+        job.status = status
+        job.error = error
+        job.finished = time.time()
+        self.store.update(job.id, status=status, error=error, finished=job.finished, size=job.size)
+        self._active.pop(job.id, None)
+
+    def expire(self, now=None):
+        """Delete clips whose time is up (see ClipStore.expired). Returns how many."""
+        now = time.time() if now is None else now
+        # Find and delete the records under one lock, so a clip that is made
+        # public (or renamed) in between is not deleted from a stale list.
+        with self._lock:
+            rows = self.store.expired(ACTIVE_STATES, now, self.retention_seconds, self.public_retention_seconds)
+            for row in rows:
+                self.store.delete(row["id"])
+        # The files are removed outside the lock, since that can be slow.
+        for row in rows:
+            job = Job.from_record(row)
+            self._remove_files(job)
+            log.info("Expired job %s", job.id)
+        return len(rows)
 
     def _sweep_untracked(self):
         """Remove files that no job refers to any more.
@@ -360,7 +563,7 @@ class JobManager:
         """
         cutoff = time.time() - 3600
         with self._lock:
-            known = set(self._jobs)
+            known = self.store.ids() | set(self._active)
         for path in self.clips_dir.iterdir():
             # File names are "<job id>.<ext>", "<job id>.part" or "<job id>.ass".
             if path.is_file() and path.name.split(".", 1)[0] not in known:
@@ -372,22 +575,11 @@ class JobManager:
                     log.warning("Could not remove untracked file %s", path)
 
     def _janitor(self):
-        """Every few minutes, forget finished jobs older than the retention time."""
+        """Every few minutes, delete expired clips and stray files."""
         while True:
             time.sleep(300)
             try:
-                cutoff = time.time() - self.retention_seconds
-                with self._lock:
-                    expired = [
-                        job
-                        for job in self._jobs.values()
-                        if job.status not in ACTIVE_STATES and job.finished and job.finished < cutoff
-                    ]
-                    for job in expired:
-                        self._jobs.pop(job.id, None)
-                for job in expired:
-                    self._remove_files(job)
-                    log.info("Expired job %s", job.id)
+                self.expire()
                 self._sweep_untracked()
             except Exception:
                 log.exception("Janitor failed")

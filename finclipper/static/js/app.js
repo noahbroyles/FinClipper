@@ -220,6 +220,9 @@ async function route() {
             case "clips":
                 await viewClips(nav);
                 break;
+            case "public":
+                await viewPublic(nav);
+                break;
             default:
                 location.hash = "#/";
         }
@@ -534,6 +537,19 @@ function createJobList(itemId, { showItemLink = false, emptyText = "No clips yet
             );
         }
         actions.push(el("button", { class: "btn small", type: "button", onclick: () => startRename(job) }, "Rename"));
+        if (job.status === "done") {
+            // Sharing puts the clip under "Public clips" for other users.
+            const share = async () => {
+                await api(`/clips/${job.id}/public`, { method: "POST", body: { public: !job.public } });
+                toast(job.public
+                    ? "The clip is private again."
+                    : "Shared. Other users who can see this video in Jellyfin will find it under Public clips.");
+            };
+            actions.push(
+                el("button", { class: "btn small", type: "button", onclick: () => action(share(), "Could not change sharing") },
+                    job.public ? "Make private" : "Make public"),
+            );
+        }
         if (isActive(job)) {
             actions.push(
                 el("button", {
@@ -564,7 +580,7 @@ function createJobList(itemId, { showItemLink = false, emptyText = "No clips yet
             job.name ? el("div", { class: "job-meta job-item", title: job.title }, itemTitle) : null,
             el("div", { class: "job-meta mono" }, `${fmtTime(job.start)} → ${fmtTime(job.end)}  (${fmtRuntime(job.duration) || "0s"})`),
             el("div", { class: "job-meta" }, job.description),
-            el("div", { class: `job-status ${job.status}` }, jobStatusText(job)),
+            el("div", { class: `job-status ${job.status}` }, jobStatusText(job), job.public ? el("span", { class: "badge" }, "Public") : null),
             isActive(job) ? el("div", { class: "progress" }, el("div", { style: `width: ${Math.round(job.progress * 100)}%` })) : null,
             el("div", { class: "job-actions" }, actions),
         );
@@ -600,8 +616,125 @@ async function viewClips(nav) {
     if (!isCurrent(nav)) return;
     show(
         el("div", { class: "page-head" }, el("h1", {}, "My clips")),
-        el("p", { class: "muted" }, "Finished clips are deleted automatically after a while, so download the ones you want to keep."),
+        el(
+            "p",
+            { class: "muted" },
+            `Finished clips are deleted ${app.me.clip_retention_hours} hours after they are made (or after you make them private), so download the ones you want to keep. `,
+            publicRetentionText("Public clips stay until you make them private.", "Public clips are deleted {hours} hours after you share them."),
+        ),
         list.element,
+    );
+}
+
+// How long public clips last, from PUBLIC_CLIP_RETENTION_HOURS (0 means
+// until they are made private). "{hours}" in the second text is replaced.
+function publicRetentionText(forever, limited) {
+    const hours = app.me.public_clip_retention_hours;
+    return hours ? limited.replace("{hours}", String(hours)) : forever;
+}
+
+// Clips other users (and you) have shared. The server only lists clips cut
+// from videos your Jellyfin account can see.
+async function viewPublic(nav) {
+    show(spinner());
+    const data = await api("/public-clips");
+    if (!isCurrent(nav)) return;
+
+    let clips = data.items;
+    const list = el("div", { class: "jobs" });
+    const players = [];
+
+    // Show or hide an inline player for a clip (MP4 only; browsers rarely play MKV).
+    function togglePlayer(box, clip) {
+        const existing = box.querySelector("video");
+        if (existing) {
+            existing.pause();
+            existing.removeAttribute("src");
+            existing.load();
+            box.replaceChildren();
+            box.classList.add("hidden");
+            return;
+        }
+        const player = el("video", {
+            controls: true,
+            autoplay: true,
+            playsinline: true,
+            src: `${BASE}api/public-clips/${clip.id}/download?inline=1`,
+        });
+        players.push(player);
+        box.replaceChildren(player);
+        box.classList.remove("hidden");
+    }
+
+    async function unshare(clip) {
+        try {
+            await api(`/clips/${clip.id}/public`, { method: "POST", body: { public: false } });
+        } catch (error) {
+            toast(error.message, true);
+            return;
+        }
+        clips = clips.filter((other) => other.id !== clip.id);
+        render();
+        toast(clip.mine ? "The clip is private again." : "The clip was taken down.");
+    }
+
+    function row(clip) {
+        const playerBox = el("div", { class: "public-player hidden" });
+        const actions = [];
+        if (data.can_download) {
+            if (clip.playable) {
+                actions.push(el("button", { class: "btn small primary", type: "button", onclick: () => togglePlayer(playerBox, clip) }, "Watch"));
+            }
+            actions.push(
+                el("a", { class: "btn small", href: `${BASE}api/public-clips/${clip.id}/download`, download: clip.filename }, "Download"),
+            );
+        }
+        // Owners can stop sharing; administrators can take down anyone's clip.
+        if (clip.mine || app.me.is_admin) {
+            actions.push(
+                el("button", { class: "btn small danger", type: "button", onclick: () => unshare(clip) }, clip.mine ? "Make private" : "Take down"),
+            );
+        }
+        // Same layout as "My clips": a named clip shows the video title below its name.
+        const itemTitle = el("a", { href: `#/item/${clip.item_id}` }, clip.title);
+        const sharer = clip.mine ? "you" : clip.owner_name || "another user";
+        return el(
+            "div",
+            { class: "job" },
+            el("div", { class: "job-title", title: clip.name || clip.title }, clip.name || itemTitle),
+            clip.name ? el("div", { class: "job-meta job-item", title: clip.title }, itemTitle) : null,
+            el("div", { class: "job-meta" }, `Shared by ${sharer} · ${fmtRuntime(clip.duration) || "0s"} · ${fmtBytes(clip.size)}`),
+            el("div", { class: "job-meta" }, clip.description),
+            playerBox,
+            actions.length ? el("div", { class: "job-actions" }, actions) : null,
+        );
+    }
+
+    function render() {
+        list.replaceChildren(
+            ...(clips.length
+                ? clips.map(row)
+                : [el("div", { class: "muted" }, "No public clips yet. Use \"Make public\" on one of your clips under My clips to share it.")]),
+        );
+    }
+
+    // Stop any playing clip when leaving the page.
+    onLeave(() => players.forEach((player) => player.pause()));
+
+    render();
+    show(
+        el("div", { class: "page-head" }, el("h1", {}, "Public clips")),
+        el(
+            "p",
+            { class: "muted" },
+            "Clips shared by people on this server, from videos your Jellyfin account can see. ",
+            publicRetentionText(
+                "They stay here until the person who shared them makes them private.",
+                "Shared clips are removed {hours} hours after they are shared.",
+            ),
+        ),
+        data.can_download ? null : notice("Your Jellyfin account is not allowed to download media, so you cannot watch or download clips."),
+        list,
     );
 }
 

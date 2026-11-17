@@ -697,6 +697,31 @@ input[type="range"] {
     color: var(--text-dim);
 }
 
+/* Small label next to a clip's status, such as "Public". */
+.badge {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+/* Inline player for a public clip. */
+.public-player {
+    margin-top: 10px;
+}
+
+.public-player video {
+    display: block;
+    width: 100%;
+    max-height: 70vh;
+    background: #000;
+    border-radius: 8px;
+}
+
 /* The video title under a named clip's heading. */
 .job-item {
     overflow: hidden;
@@ -830,14 +855,38 @@ input[type="range"] {
 }
 
 @media (max-width: 700px) {
+    /* The links and Sign out share the first row; the search box gets a
+       full-width second row instead of being squeezed between them. */
     .topbar {
-        padding: 0 12px;
-        gap: 10px;
+        height: auto;
+        flex-wrap: wrap;
+        padding: 8px 12px;
+        gap: 8px 10px;
+    }
+
+    .search {
+        order: 1;
+        flex-basis: 100%;
+    }
+
+    .search input {
+        max-width: none;
+    }
+
+    .user {
+        margin-left: auto;
     }
 
     .brand span,
     .user .name {
         display: none;
+    }
+
+    /* Three nav links have to fit next to the search box. */
+    .topbar nav a {
+        padding: 6px;
+        font-size: 14px;
+        white-space: nowrap;
     }
 
     main {

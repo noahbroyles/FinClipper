@@ -1,8 +1,9 @@
 """gunicorn settings for FinClipper.
 
-Clip jobs are tracked in memory, so there must be exactly one worker
-process. Concurrency comes from threads instead: preview streaming and
-downloads each hold a thread for as long as they run.
+Clip records are stored in SQLite, but the job queue and the running ffmpeg
+processes live in memory, so there must be exactly one worker process.
+Concurrency comes from threads instead: preview streaming and downloads
+each hold a thread for as long as they run.
 """
 
 import os

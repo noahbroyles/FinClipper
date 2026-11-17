@@ -88,10 +88,12 @@ class Config:
         if not jellyfin_url.startswith(("http://", "https://")):
             raise RuntimeError("JELLYFIN_URL must start with http:// or https://")
 
-        # Where finished clips and the generated secret key live.
+        # Where finished clips, the clip database and the generated secret
+        # key live.
         self.DATA_DIR = Path(os.environ.get("DATA_DIR", "/data")).resolve()
         self.CLIPS_DIR = self.DATA_DIR / "clips"
         self.CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+        self.DATABASE_PATH = self.DATA_DIR / "finclipper.db"
 
         # Jellyfin connection.
         self.JELLYFIN_URL = jellyfin_url
@@ -107,6 +109,9 @@ class Config:
         self.MAX_CONCURRENT_JOBS = _env_int("MAX_CONCURRENT_JOBS", 2, minimum=1)
         self.MAX_JOBS_PER_USER = _env_int("MAX_JOBS_PER_USER", 3, minimum=1)
         self.CLIP_RETENTION_HOURS = _env_int("CLIP_RETENTION_HOURS", 24, minimum=1)
+        # How long public clips are kept after they are shared. 0 keeps them
+        # until their owner makes them private or deletes them.
+        self.PUBLIC_CLIP_RETENTION_HOURS = _env_int("PUBLIC_CLIP_RETENTION_HOURS", 0, minimum=0)
 
         # Re-encode settings for "precise" mode.
         self.X264_PRESET = os.environ.get("X264_PRESET", "veryfast").strip() or "veryfast"

@@ -13,6 +13,7 @@ def create_app():
     from .views import views
     from .config import Config
     from .jobs import JobManager
+    from .store import ClipStore
     from werkzeug.middleware.proxy_fix import ProxyFix
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -28,9 +29,11 @@ def create_app():
 
     manager = JobManager(
         clips_dir=config.CLIPS_DIR,
+        store=ClipStore(config.DATABASE_PATH),
         max_concurrent=config.MAX_CONCURRENT_JOBS,
         max_per_user=config.MAX_JOBS_PER_USER,
         retention_hours=config.CLIP_RETENTION_HOURS,
+        public_retention_hours=config.PUBLIC_CLIP_RETENTION_HOURS,
     )
     manager.start()
     app.extensions["finclipper_jobs"] = manager

@@ -16,6 +16,7 @@ It is written in Python with Flask, and is meant to run as a Docker container on
 - Burn in subtitles (precise mode). Text subtitles (SRT, ASS, WebVTT, including external subtitle files) can use one of four styles: classic white with an outline, white on a dark box, yellow, or serif. Picture subtitles (Blu-ray PGS, DVD, DVB) inside the video file are burned in as they are.
 - Vertical 9:16 clips for phones (precise mode), at 1080×1920, 720×1280 or 540×960. The picture can be cropped to fill the screen (with a slider and a guide on the preview to choose which part is kept), shown whole over a blurred copy of itself, or shown whole with black bars.
 - Optional clip names, used in the clip list and as the download file name. Clips can be renamed later.
+- Share finished clips with "Make public". They appear under "Public clips" for other signed in users, who can watch them in the browser or download them. A public clip is only listed for users whose Jellyfin account can see the video it was cut from, and watching or downloading needs the same Jellyfin download permission as making clips. The owner can make a clip private again, and administrators can take down anyone's public clip.
 - Background jobs with live progress, cancel and delete. Finished clips are deleted automatically after a configurable time.
 - The browser never talks to Jellyfin directly, so Jellyfin does not need to be reachable from where you use FinClipper.
 
@@ -83,11 +84,12 @@ All settings are environment variables. Only `JELLYFIN_URL` is required.
 | `MAX_CLIP_SECONDS` | `600` | Longest allowed clip in seconds. `0` removes the limit. |
 | `MAX_CONCURRENT_JOBS` | `2` | How many ffmpeg processes may run at the same time. Further jobs wait in a queue. |
 | `MAX_JOBS_PER_USER` | `3` | How many queued or running clips one user may have. |
-| `CLIP_RETENTION_HOURS` | `24` | Finished clips are deleted after this many hours. |
+| `CLIP_RETENTION_HOURS` | `24` | Finished clips are deleted after this many hours. A clip that is made private again gets this long again, counted from then. Public clips are not affected. |
+| `PUBLIC_CLIP_RETENTION_HOURS` | `0` | Public clips are deleted this many hours after they are shared. `0` keeps them until their owner makes them private or deletes them. |
 | `X264_PRESET` | `veryfast` | x264 preset for precise mode. Slower presets give smaller files. |
 | `X264_CRF` | `20` | x264 quality for precise mode. Lower is better quality and bigger files. |
 | `REQUIRE_DOWNLOAD_PERMISSION` | `true` | Only users allowed to download media in Jellyfin (and administrators) may create clips. |
-| `DATA_DIR` | `/data` | Where clips and the generated secret key are stored. |
+| `DATA_DIR` | `/data` | Where clips, the clip database (`finclipper.db`) and the generated secret key are stored. |
 | `SECRET_KEY` | (generated) | Session signing key. If unset, a random key is generated once and saved in `DATA_DIR/secret_key`. |
 | `SESSION_DAYS` | `30` | How long a login lasts. |
 | `SESSION_COOKIE_SECURE` | `false` | Set to `true` when FinClipper is only served over HTTPS. |
@@ -99,7 +101,7 @@ All settings are environment variables. Only `JELLYFIN_URL` is required.
 
 A clip is effectively a download, so by default FinClipper only lets a user create clips if their Jellyfin account has "Allow media downloading" enabled (or is an administrator). Users without it can still browse and preview, but the Create button is disabled. Set `REQUIRE_DOWNLOAD_PERMISSION=false` to allow everyone, and consider `MAX_CLIP_SECONDS` as the way to stop whole movies being "clipped".
 
-Users only ever see and download their own clips.
+Users only see their own clips, plus clips other users have made public. A public clip is only listed for users whose Jellyfin account can see the video it was cut from (library access and parental rating limits apply), and watching or downloading it needs the same download permission as creating clips. Administrators can take down anyone's public clip.
 
 ## Reverse proxy
 
@@ -108,7 +110,7 @@ FinClipper works behind a reverse proxy such as nginx, Caddy or Traefik:
 - Set `TRUSTED_PROXIES=1` (one proxy) so client IPs and the scheme are taken from the forwarded headers.
 - Set `SESSION_COOKIE_SECURE=true` if the site is HTTPS only.
 - Serving under a sub path (for example `/finclipper/`) works if the proxy sends `X-Forwarded-Prefix` and `TRUSTED_PROXIES` is set.
-- Disable response buffering for `/api/stream/` and `/api/clips/` if your proxy buffers large responses, so preview segments and downloads start immediately.
+- Disable response buffering for `/api/stream/`, `/api/clips/` and `/api/public-clips/` if your proxy buffers large responses, so preview segments and downloads start immediately.
 
 ## Keyboard shortcuts in the editor
 
@@ -131,7 +133,7 @@ FinClipper works behind a reverse proxy such as nginx, Caddy or Traefik:
 
 ## Limitations
 
-- Jobs are kept in memory, so the app must run as a single gunicorn worker (the included `gunicorn.conf.py` does this). Restarting the container forgets all jobs and deletes their files. Login sessions survive restarts.
+- Clips are stored in a SQLite database in `DATA_DIR` and survive restarts, as do login sessions. The job queue and running ffmpeg processes are kept in memory, so the app must run as a single gunicorn worker (the included `gunicorn.conf.py` does this), and clips that were queued or being made when the container stopped are marked as failed and have to be created again.
 - DVD and Blu-ray folders and ISO images are not supported, only regular video files.
 - External audio files (separate `.mka`/`.ac3` next to the video) cannot be selected, only audio tracks inside the video file.
 - Subtitles can only be burned in (precise mode), not added as a separate track. The preview player does not show them.
@@ -167,7 +169,8 @@ finclipper/
     api.py           JSON API, HLS preview proxy, clip endpoints
     views.py         HTML pages and /healthz
     media.py         timestamps, stream selection, path mapping, subtitle conversion, ffmpeg command builder
-    jobs.py          background ffmpeg job queue
+    jobs.py          background ffmpeg job queue, expiry and sharing
+    store.py         SQLite storage for clip records
     templates/       base, login and app pages
     static/          CSS, JavaScript (no build step) and a vendored copy of hls.js 1.7.4
 tests/               unit tests and ffmpeg integration tests
