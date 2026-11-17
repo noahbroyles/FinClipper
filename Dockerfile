@@ -1,9 +1,11 @@
 FROM python:3.13-slim-trixie
 
 # ffmpeg cuts the clips. tini runs as PID 1 so signals reach gunicorn and
-# any stray child processes are reaped.
+# any stray child processes are reaped. The fonts are the ones the burned-in
+# subtitle styles use (SUBTITLE_STYLES in finclipper/media.py); installing
+# them also builds the system fontconfig cache that libass reads.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg tini \
+    && apt-get install -y --no-install-recommends ffmpeg tini fonts-liberation fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

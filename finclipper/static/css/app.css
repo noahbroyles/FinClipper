@@ -391,10 +391,28 @@ main {
 }
 
 .player {
+    /* Positioning box for the crop guide drawn over the video. */
+    position: relative;
     background: #000;
     border-radius: var(--radius);
     overflow: hidden;
     aspect-ratio: 16 / 9;
+}
+
+/* Covers the picture area of the video; app.js sets its position and size.
+   It ignores the pointer so the video controls underneath keep working. */
+.crop-guide {
+    position: absolute;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+/* The area a vertical crop keeps. The huge shadow dims everything around it. */
+.crop-window {
+    position: absolute;
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+    outline: 2px solid #fff;
+    outline-offset: -2px;
 }
 
 .player video {
@@ -577,6 +595,59 @@ kbd {
 .mode input {
     margin-top: 3px;
     accent-color: var(--accent);
+}
+
+/* Two or more radio buttons shown as one row of buttons (Horizontal / Vertical). */
+.segmented {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.segmented label {
+    flex: 1;
+    cursor: pointer;
+}
+
+/* The radio itself is hidden; the label text acts as the button. */
+.segmented input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.segmented span {
+    display: block;
+    padding: 8px 10px;
+    text-align: center;
+    font-size: 14px;
+}
+
+.segmented label + label span {
+    border-left: 1px solid var(--border);
+}
+
+.segmented input:checked + span {
+    background: var(--accent-soft);
+    color: var(--text);
+    font-weight: 600;
+}
+
+.segmented input:focus-visible + span {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+
+input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+}
+
+/* A disabled mode option (Fast, when subtitles or a vertical shape need Precise). */
+.mode:has(input:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .mode strong {

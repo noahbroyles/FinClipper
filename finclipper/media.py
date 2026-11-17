@@ -23,6 +23,83 @@ MP4_AUDIO_COPY = {"aac", "mp3", "ac3", "eac3"}
 # Output heights offered for precise (re-encode) mode. 0 means "original".
 ALLOWED_HEIGHTS = {0, 2160, 1440, 1080, 720, 480, 360}
 
+# Vertical (9:16, phone screen) output sizes, as {height: width}. The height
+# is what the API receives as max_height for a vertical clip. Must match
+# VERTICAL_SIZES in app.js.
+VERTICAL_SIZES = {1920: 1080, 1280: 720, 960: 540}
+
+# How a horizontal picture is fitted into a vertical frame:
+#   crop  fill the frame and cut off the sides (crop_x picks which part)
+#   blur  show the whole picture over a blurred, zoomed copy of itself
+#   bars  show the whole picture with black bars above and below
+VERTICAL_FITS = {"crop", "blur", "bars"}
+
+# Subtitle codecs that are pictures (Blu-ray PGS, DVD, DVB). ffmpeg overlays
+# them as they are, so the font styles below do not apply to them.
+BITMAP_SUBTITLE_CODECS = {"pgssub", "hdmv_pgs_subtitle", "dvdsub", "dvd_subtitle", "dvbsub", "dvb_subtitle", "xsub"}
+
+# Looks offered for burned-in text subtitles. Colours are ASS &HAABBGGRR
+# values (AA is transparency, 00 is opaque). With border_style 1 the text
+# gets an outline and a shadow; with 3 the outline colour fills a box behind
+# each line instead, and "outline" is the box padding. The fonts are
+# installed in the Docker image (fonts-liberation, fonts-dejavu-core).
+SUBTITLE_STYLES = {
+    "classic": {
+        "label": "Classic (white, outlined)",
+        "font": "Liberation Sans",
+        "bold": True,
+        "primary": "&H00FFFFFF",
+        "outline_colour": "&H00000000",
+        "back_colour": "&H80000000",
+        "border_style": 1,
+        "outline": 3,
+        "shadow": 1,
+    },
+    "boxed": {
+        "label": "Boxed (white on dark box)",
+        "font": "DejaVu Sans",
+        "bold": False,
+        "primary": "&H00FFFFFF",
+        "outline_colour": "&H40000000",
+        "back_colour": "&H00000000",
+        "border_style": 3,
+        "outline": 10,
+        "shadow": 0,
+    },
+    "yellow": {
+        "label": "Yellow (outlined)",
+        "font": "Liberation Sans",
+        "bold": True,
+        "primary": "&H0000FFFF",
+        "outline_colour": "&H00000000",
+        "back_colour": "&H80000000",
+        "border_style": 1,
+        "outline": 3,
+        "shadow": 1,
+    },
+    "serif": {
+        "label": "Serif (cinema)",
+        "font": "Liberation Serif",
+        "bold": False,
+        "primary": "&H00FFFFFF",
+        "outline_colour": "&H00000000",
+        "back_colour": "&HA0000000",
+        "border_style": 1,
+        "outline": 2,
+        "shadow": 2,
+    },
+}
+
+# Canvas (PlayRes) and placement of burned-in text subtitles per layout.
+# libass scales the canvas to the real frame by its height and never
+# stretches the text, so one canvas per layout works for any frame size.
+# A vertical clip puts the text about a fifth of the way up, clear of the
+# buttons phone apps draw over the bottom of the video.
+SUBTITLE_CANVAS = {
+    "horizontal": {"width": 1920, "height": 1080, "font_size": 56, "margin_side": 120, "margin_bottom": 60},
+    "vertical": {"width": 1080, "height": 1920, "font_size": 66, "margin_side": 70, "margin_bottom": 400},
+}
+
 # Characters that are not allowed in file names on common filesystems.
 _UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*]')
 
@@ -131,6 +208,30 @@ def audio_streams(source):
     ]
 
 
+def subtitle_kind(stream):
+    """Return "text" or "bitmap" for a subtitle that can be burned in, else None.
+
+    Text subtitles (SRT, ASS, WebVTT...) are fetched from Jellyfin, which
+    also serves external subtitle files. Picture subtitles are read by ffmpeg
+    from the video file itself, so only embedded ones can be used.
+    """
+    codec = (stream.get("Codec") or "").lower()
+    if codec in BITMAP_SUBTITLE_CODECS:
+        return None if stream.get("IsExternal") else "bitmap"
+    if stream.get("IsTextSubtitleStream"):
+        return "text"
+    return None
+
+
+def subtitle_streams(source):
+    """Subtitle streams of a media source that can be burned into a clip."""
+    return [
+        stream
+        for stream in source.get("MediaStreams") or []
+        if stream.get("Type") == "Subtitle" and subtitle_kind(stream)
+    ]
+
+
 def default_audio_index(source):
     """Pick the audio stream Jellyfin would play by default."""
     streams = audio_streams(source)
@@ -173,6 +274,14 @@ def summarize_source(source):
             for stream in audio_streams(source)
         ],
         "default_audio": default_audio_index(source),
+        "subtitles": [
+            {
+                "index": stream.get("Index"),
+                "title": stream.get("DisplayTitle") or stream.get("Language") or stream.get("Codec") or "Subtitles",
+                "kind": subtitle_kind(stream),
+            }
+            for stream in subtitle_streams(source)
+        ],
     }
 
 
@@ -268,6 +377,134 @@ def clip_filename(title, start, end, extension, name=""):
     return f"{safe_filename(title)} [{span}].{extension}"
 
 
+# "00:01:02,345 --> 00:01:04,000" (a dot instead of the comma is accepted too).
+_SRT_TIMING = re.compile(
+    r"(\d+):(\d{1,2}):(\d{1,2})[,.](\d{1,3})\s*-->\s*(\d+):(\d{1,2}):(\d{1,2})[,.](\d{1,3})"
+)
+# ASS override blocks such as {\an8} that SRT files sometimes carry.
+_ASS_OVERRIDE = re.compile(r"(\{\\[^}]*\})")
+
+
+def _srt_seconds(hours, minutes, seconds, millis):
+    # The fraction is milliseconds; pad short values ("5" means 500 ms).
+    return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(millis.ljust(3, "0")) / 1000
+
+
+def parse_srt(text):
+    """Parse SubRip text into a list of (start, end, lines) tuples.
+
+    Lenient on purpose: numbering lines are ignored, and a cue is any
+    timing line followed by text up to the next blank line.
+    """
+    cues = []
+    current = None
+    for raw_line in text.lstrip("﻿").splitlines():
+        line = raw_line.strip()
+        timing = _SRT_TIMING.search(line)
+        if timing:
+            groups = timing.groups()
+            current = (_srt_seconds(*groups[:4]), _srt_seconds(*groups[4:]), [])
+            cues.append(current)
+        elif not line:
+            current = None
+        elif current is not None:
+            current[2].append(line)
+    return [cue for cue in cues if cue[2] and cue[1] > cue[0]]
+
+
+def _srt_text_to_ass(lines):
+    """Convert SubRip cue text to ASS dialogue text.
+
+    <i>, <b> and <u> become ASS overrides and other HTML-like tags (such as
+    <font>) are dropped. ASS override blocks like {\\an8} are kept. Any
+    other braces would hide text in ASS, so they become parentheses.
+    """
+    parts = _ASS_OVERRIDE.split("\n".join(lines))
+    out = []
+    for number, part in enumerate(parts):
+        if number % 2:
+            out.append(part)
+            continue
+        part = part.replace("{", "(").replace("}", ")")
+        part = re.sub(
+            r"<\s*(/?)\s*([ibu])\s*>",
+            lambda match: "{\\%s%s}" % (match.group(2).lower(), "0" if match.group(1) else "1"),
+            part,
+            flags=re.IGNORECASE,
+        )
+        part = re.sub(r"<[^>]*>", "", part)
+        out.append(part)
+    return "".join(out).replace("\n", "\\N")
+
+
+def _ass_time(seconds):
+    """Format seconds as an ASS timestamp, H:MM:SS.cc."""
+    centis = int(round(seconds * 100))
+    hours, rest = divmod(centis, 360_000)
+    minutes, rest = divmod(rest, 6_000)
+    secs, centis = divmod(rest, 100)
+    return f"{hours}:{minutes:02d}:{secs:02d}.{centis:02d}"
+
+
+def build_ass(srt_text, start, end, style_key, layout):
+    """Turn a full SubRip track into an ASS file for one clip.
+
+    Only cues that overlap the clip are kept, and their times are shifted
+    so the clip starts at 0, matching the timestamps ffmpeg gives the
+    frames after seeking. A cue already on screen at the start is kept and
+    clipped. style_key picks a SUBTITLE_STYLES entry and layout a
+    SUBTITLE_CANVAS entry.
+    """
+    style = SUBTITLE_STYLES[style_key]
+    canvas = SUBTITLE_CANVAS[layout]
+    # Box padding and outlines are defined for the 1080 tall horizontal
+    # canvas; scale them with the font size for the vertical one.
+    factor = canvas["font_size"] / SUBTITLE_CANVAS["horizontal"]["font_size"]
+    outline = round(style["outline"] * factor, 1)
+    shadow = round(style["shadow"] * factor, 1)
+    style_line = ",".join(str(value) for value in (
+        "Default", style["font"], canvas["font_size"],
+        style["primary"], style["primary"], style["outline_colour"], style["back_colour"],
+        -1 if style["bold"] else 0, 0, 0, 0,  # bold, italic, underline, strikeout
+        100, 100, 0, 0,  # scale x, scale y, spacing, angle
+        style["border_style"], outline, shadow,
+        2,  # alignment: bottom centre
+        canvas["margin_side"], canvas["margin_side"], canvas["margin_bottom"],
+        1,  # encoding
+    ))
+    lines = [
+        "[Script Info]",
+        "; Generated by FinClipper",
+        "ScriptType: v4.00+",
+        f"PlayResX: {canvas['width']}",
+        f"PlayResY: {canvas['height']}",
+        "WrapStyle: 0",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
+        "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: {style_line}",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    for cue_start, cue_end, cue_lines in parse_srt(srt_text):
+        if cue_end <= start or cue_start >= end:
+            continue
+        shifted_start = max(cue_start, start) - start
+        shifted_end = min(cue_end, end) - start
+        if _ass_time(shifted_end) == _ass_time(shifted_start):
+            # Shorter than a hundredth of a second after clipping.
+            continue
+        lines.append(
+            f"Dialogue: 0,{_ass_time(shifted_start)},{_ass_time(shifted_end)},Default,,0,0,0,,"
+            + _srt_text_to_ass(cue_lines)
+        )
+    return "\n".join(lines) + "\n"
+
+
 def plan_output(mode, video, audio):
     """Decide the container and codec handling for a clip.
 
@@ -307,14 +544,116 @@ def plan_output(mode, video, audio):
 
 
 def _scale_filter(max_height):
-    """Scale filter that never upscales and always yields even dimensions.
+    """Scale filter for horizontal clips: never upscales, even dimensions.
 
-    libx264 with yuv420p requires even width and height. The expressions are
-    single quoted so their commas are not read as filter separators.
+    The width comes from the display aspect ratio (dar), and setsar=1 marks
+    the pixels square, so anamorphic sources such as DVDs come out the
+    right shape in apps that ignore the sample aspect ratio. libx264 with
+    yuv420p requires even width and height. The expressions are single
+    quoted so their commas are not read as filter separators; the width can
+    refer to the output height (oh) because ffmpeg evaluates it twice.
     """
-    if max_height:
-        return f"scale=w=-2:h='trunc(min({max_height},ih)/2)*2'"
-    return "scale=w='trunc(iw/2)*2':h='trunc(ih/2)*2'"
+    height = f"trunc(min({max_height},ih)/2)*2" if max_height else "trunc(ih/2)*2"
+    return f"scale=w='trunc(oh*dar/2)*2':h='{height}',setsar=1"
+
+
+def _join(filters):
+    """Join filters into a chain; "null" (pass through) when there are none."""
+    return ",".join(filters) or "null"
+
+
+def _video_graph(video, max_height, layout, fit, crop_x, subtitle):
+    """Build the -filter_complex graph for a precise (re-encoded) clip.
+
+    The graph reads the video stream (and a picture subtitle stream) of
+    input 0 and ends in the [vout] pad. Steps, in order:
+
+    1. deinterlace (yadif) when Jellyfin reports interlaced video
+    2. picture subtitles, drawn at the source resolution, unless the clip
+       is a vertical crop (see 4)
+    3. resize: horizontal clips scale down to max_height; vertical clips
+       first get square pixels, then are cropped, fitted with a blurred
+       background, or fitted with black bars into the 9:16 frame
+    4. vertical crop only: picture subtitles are scaled to the frame width
+       and drawn after the crop, because a centre crop would cut off the
+       ends of most lines
+    5. text subtitles (an ASS file made by build_ass) on the final frame
+
+    HDR tone mapping runs right after the first resize, so the expensive
+    float conversion happens at the output resolution, not the source's.
+    subtitle is None, {"kind": "text", "file": name} with the ASS file name
+    relative to ffmpeg's working directory, or {"kind": "bitmap", "index": n}
+    with the stream index in the input file.
+    """
+    is_hdr = (video.get("VideoRange") or "").upper() == "HDR"
+    tonemap = _tonemap_filters(video) if is_hdr else []
+    bitmap = subtitle if subtitle and subtitle["kind"] == "bitmap" else None
+    text = subtitle if subtitle and subtitle["kind"] == "text" else None
+    vertical_crop = layout == "vertical" and fit == "crop"
+
+    graph = []  # finished chains, joined with ";" at the end
+    source = f"[0:{video['Index']}]"  # input pad(s) of the chain being built
+    steps = ["yadif"] if video.get("IsInterlaced") else []
+
+    if bitmap and not vertical_crop:
+        # The subtitle canvas is normally the size of the video, but some
+        # files keep a 1920x1080 canvas on video that was cropped to a wider
+        # shape. Scaling the canvas to the video width and pinning it to the
+        # bottom keeps the text on screen either way.
+        canvas = f"scale=w={video['Width']}:h=-2" if video.get("Width") else "null"
+        graph.append(f"{source}{_join(steps)}[pre]")
+        graph.append(f"[0:{bitmap['index']}]{canvas}[subs]")
+        source = "[pre][subs]"
+        steps = ["overlay=x=(W-w)/2:y=H-h:eof_action=pass"]
+
+    if layout == "horizontal":
+        steps += [_scale_filter(max_height), *tonemap]
+    else:
+        width, height = VERTICAL_SIZES[max_height], max_height
+        # Square pixels first, so the 9:16 maths below works on the shape
+        # the picture is really shown at.
+        steps.append("scale=w='trunc(iw*sar/2)*2':h='trunc(ih/2)*2',setsar=1")
+        fit_inside = f"scale=w={width}:h={height}:force_original_aspect_ratio=decrease:force_divisible_by=2"
+        if fit == "crop":
+            # The largest 9:16 area of the picture; crop_x (0 = left edge,
+            # 1 = right edge) picks where it sits. Taller pictures are
+            # cropped top and bottom instead, around the middle.
+            steps += [
+                "crop=w='trunc(min(iw,ih*9/16)/2)*2':h='trunc(min(ih,iw*16/9)/2)*2'"
+                f":x='(iw-ow)*{crop_x:.4f}':y='(ih-oh)/2'",
+                f"scale={width}:{height}",
+                *tonemap,
+            ]
+        elif fit == "bars":
+            steps += [fit_inside, *tonemap, f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"]
+        else:
+            # The background is made from a tiny copy (a tenth of the frame),
+            # which makes the blur cheap, then scaled back up.
+            small_w, small_h = width // 10 // 2 * 2, height // 10 // 2 * 2
+            steps += [fit_inside, *tonemap, "split=2[fg][bgsrc]"]
+            graph.append(f"{source}{_join(steps)}")
+            graph.append(
+                f"[bgsrc]scale=w={small_w}:h={small_h}:force_original_aspect_ratio=increase,"
+                f"crop={small_w}:{small_h},boxblur=luma_radius=8:luma_power=2,scale={width}:{height}[bg]"
+            )
+            source = "[bg][fg]"
+            steps = ["overlay=x=(W-w)/2:y=(H-h)/2"]
+        steps.append("setsar=1")
+
+    if bitmap and vertical_crop:
+        # Bottom of the scaled canvas at 78% of the frame height, so the
+        # text sits where phone captions usually go.
+        graph.append(f"{source}{_join(steps)}[main]")
+        graph.append(f"[0:{bitmap['index']}]scale=w={VERTICAL_SIZES[max_height]}:h=-2[subs]")
+        source = "[main][subs]"
+        steps = ["overlay=x=(W-w)/2:y=H*0.78-h:eof_action=pass"]
+
+    steps.append("format=yuv420p")
+    if text:
+        # After the colour conversion, so HDR sources get SDR subtitle colours.
+        steps.append(f"subtitles=filename={text['file']}")
+    graph.append(f"{source}{_join(steps)}[vout]")
+    return ";".join(graph)
 
 
 def _tonemap_filters(video):
@@ -349,6 +688,10 @@ def build_ffmpeg_command(
     preset="veryfast",
     crf=20,
     http_headers=None,
+    layout="horizontal",
+    fit="crop",
+    crop_x=0.5,
+    subtitle=None,
 ):
     """Build the ffmpeg argument list for one clip.
 
@@ -357,10 +700,22 @@ def build_ffmpeg_command(
     duration     clip length in seconds
     video/audio  Jellyfin MediaStream dicts (audio may be None)
     mode         "fast" (stream copy) or "precise" (re-encode)
-    max_height   output height limit for precise mode, 0 for original
+    max_height   horizontal: output height limit for precise mode, 0 for
+                 original; vertical: the output height (a VERTICAL_SIZES key)
     plan         result of plan_output()
     http_headers raw header block sent when source is a URL
+    layout       "horizontal" or "vertical" (precise mode only)
+    fit/crop_x   how a vertical clip is framed (see VERTICAL_FITS)
+    subtitle     subtitles to burn in (precise mode only), see _video_graph
+
+    The command must run with the clips directory as its working directory
+    when a text subtitle file is used, because the file is referred to by
+    name only (a full path would need escaping inside the filter graph).
     """
+    if mode != "precise" and (layout != "horizontal" or subtitle):
+        raise ValueError("Vertical clips and burned-in subtitles need precise mode")
+    if subtitle and subtitle["kind"] == "text" and not re.fullmatch(r"[\w.-]+", subtitle["file"]):
+        raise ValueError("The subtitle file name must not need escaping")
     # nice keeps Jellyfin playback responsive while a clip is being encoded.
     cmd = ["nice", "-n", "10", "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
 
@@ -374,7 +729,12 @@ def build_ffmpeg_command(
     # so the cut is frame accurate.
     cmd += ["-ss", f"{start:.3f}", "-i", str(source), "-t", f"{duration:.3f}"]
 
-    cmd += ["-map", f"0:{video['Index']}"]
+    if mode == "precise":
+        # The filter graph reads the video (and picture subtitle) streams
+        # itself; its output pad is mapped like a stream.
+        cmd += ["-filter_complex", _video_graph(video, max_height, layout, fit, crop_x, subtitle), "-map", "[vout]"]
+    else:
+        cmd += ["-map", f"0:{video['Index']}"]
     if audio is not None:
         cmd += ["-map", f"0:{audio['Index']}"]
 
@@ -382,15 +742,7 @@ def build_ffmpeg_command(
     cmd += ["-map_metadata", "-1", "-map_chapters", "-1"]
 
     if mode == "precise":
-        filters = []
-        if video.get("IsInterlaced"):
-            filters.append("yadif")
-        filters.append(_scale_filter(max_height))
         is_hdr = (video.get("VideoRange") or "").upper() == "HDR"
-        if is_hdr:
-            filters += _tonemap_filters(video)
-        filters.append("format=yuv420p")
-        cmd += ["-vf", ",".join(filters)]
         cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-profile:v", "high"]
         if is_hdr:
             # Tag the tonemapped output so players do not guess the colors.

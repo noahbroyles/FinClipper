@@ -31,6 +31,8 @@ TOKEN_PARAMS = {"api_key", "apikey"}
 BROWSABLE_COLLECTIONS = {"movies", "tvshows", "homevideos", "musicvideos", "boxsets", "folders", None}
 # Item types returned by search.
 SEARCH_TYPES = "Movie,Series,Episode,Video,MusicVideo"
+# Largest subtitle track accepted from Jellyfin. Real tracks are far smaller.
+MAX_SUBTITLE_BYTES = 20 * 1024 * 1024
 
 
 # ----- request hooks and error handling -------------------------------------
@@ -131,6 +133,40 @@ def rewrite_playlist(text):
     return "\n".join(lines) + "\n"
 
 
+def subtitle_fetcher(client, item_id, source_id, index, path, start, end, style, layout):
+    """Return a function that writes the ASS subtitle file for one clip.
+
+    The function downloads the whole text subtitle track from Jellyfin as
+    SRT (Jellyfin converts any text format, and also serves external
+    subtitle files) and keeps the part inside the clip. It runs in the job
+    worker rather than in the request, because the first time a track is
+    used Jellyfin has to extract it from the video file, which can take a
+    while for a long movie. Errors are raised with a message for the user.
+    """
+    url = f"/Videos/{item_id}/{quote(source_id, safe='')}/Subtitles/{index}/Stream.srt"
+
+    def fetch():
+        try:
+            response = client.request("GET", url, stream=True, timeout=(5, 300))
+        except JellyfinError as exc:
+            raise RuntimeError(f"Could not get the subtitles: {exc}") from exc
+        try:
+            if not response.ok:
+                raise RuntimeError(f"Jellyfin could not provide the subtitles (HTTP {response.status_code})")
+            body = bytearray()
+            for chunk in response.iter_content(65536):
+                body += chunk
+                if len(body) > MAX_SUBTITLE_BYTES:
+                    raise RuntimeError("The subtitle track is too large")
+        finally:
+            response.close()
+        # Jellyfin serves converted subtitles as UTF-8.
+        text = body.decode("utf-8", errors="replace")
+        path.write_text(media.build_ass(text, start, end, style, layout), encoding="utf-8")
+
+    return fetch
+
+
 # ----- authentication --------------------------------------------------------
 
 
@@ -177,6 +213,8 @@ def me():
         is_admin=session.get("is_admin", False),
         can_clip=can_clip(),
         max_clip_seconds=config["MAX_CLIP_SECONDS"],
+        # Looks offered for burned-in text subtitles, in display order.
+        subtitle_styles=[{"id": key, "label": style["label"]} for key, style in media.SUBTITLE_STYLES.items()],
     )
 
 
@@ -399,11 +437,32 @@ def create_clip():
         end = media.parse_timestamp(data.get("end"))
     except ValueError as exc:
         return bad_request(str(exc))
+    # Shape: "horizontal" keeps the source's shape, "vertical" makes a 9:16
+    # phone screen clip framed as "fit" says (crop_x places a crop).
+    layout = data.get("layout") or "horizontal"
+    if layout not in ("horizontal", "vertical"):
+        return bad_request("Layout must be horizontal or vertical")
+    fit = data.get("fit") or "crop"
+    if fit not in media.VERTICAL_FITS:
+        return bad_request("Invalid vertical framing")
+    crop_x = data.get("crop_x", 0.5)
+    # NaN and infinity (which Python's JSON parser accepts) fail the range check.
+    if isinstance(crop_x, bool) or not isinstance(crop_x, (int, float)) or not 0 <= crop_x <= 1:
+        return bad_request("Invalid crop position")
+    # subtitle_index: null or missing means no burned-in subtitles.
+    subtitle_index = data.get("subtitle_index")
+    if subtitle_index is not None and (isinstance(subtitle_index, bool) or not isinstance(subtitle_index, int)):
+        return bad_request("Invalid subtitle track")
+    subtitle_style = data.get("subtitle_style") or "classic"
+    if subtitle_style not in media.SUBTITLE_STYLES:
+        return bad_request("Unknown subtitle style")
+    if mode == "fast" and (layout == "vertical" or subtitle_index is not None):
+        return bad_request("Vertical clips and burned-in subtitles need Precise mode")
     try:
         max_height = int(data.get("max_height") or 0)
     except (TypeError, ValueError):
         return bad_request("Invalid resolution")
-    if max_height not in media.ALLOWED_HEIGHTS:
+    if max_height not in (media.VERTICAL_SIZES if layout == "vertical" else media.ALLOWED_HEIGHTS):
         return bad_request("Invalid resolution")
     try:
         name = media.clean_clip_name(data.get("name"))
@@ -442,6 +501,12 @@ def create_clip():
         if audio is None:
             return bad_request("Unknown audio track")
 
+    subtitle_stream = None
+    if subtitle_index is not None:
+        subtitle_stream = next((s for s in media.subtitle_streams(source) if s.get("Index") == subtitle_index), None)
+        if subtitle_stream is None:
+            return bad_request("Unknown subtitle track")
+
     # Validate the range against the real runtime.
     runtime = media.ticks_to_seconds(source.get("RunTimeTicks") or item.get("RunTimeTicks"))
     if runtime:
@@ -472,6 +537,21 @@ def create_clip():
         return bad_request("The media file is not reachable from FinClipper. Check PATH_MAP and the volume mounts.")
 
     job_id = uuid.uuid4().hex
+    subtitle = None
+    prepare = None
+    if subtitle_stream is not None and media.subtitle_kind(subtitle_stream) == "bitmap":
+        # Picture subtitles are read by ffmpeg straight from the input.
+        subtitle = {"kind": "bitmap", "index": subtitle_index}
+    elif subtitle_stream is not None:
+        # Text subtitles are fetched and turned into an ASS file by the job
+        # worker before ffmpeg starts; the filter graph names that file.
+        subtitle_file = jobs().subtitle_name(job_id)
+        subtitle = {"kind": "text", "file": subtitle_file}
+        prepare = subtitle_fetcher(
+            client, item_id, source_id, subtitle_index, config["CLIPS_DIR"] / subtitle_file,
+            start, end, subtitle_style, layout,
+        )
+
     plan = media.plan_output(mode, video, audio)
     command = media.build_ffmpeg_command(
         source=input_source,
@@ -486,13 +566,25 @@ def create_clip():
         preset=config["X264_PRESET"],
         crf=config["X264_CRF"],
         http_headers=http_headers,
+        layout=layout,
+        fit=fit,
+        crop_x=float(crop_x),
+        subtitle=subtitle,
     )
     # Same command with the token hidden, for logs.
     redacted = ["Authorization: <redacted>" if arg == http_headers else arg for arg in command]
 
     description = plan["description"]
-    if mode == "precise" and max_height:
+    if layout == "vertical":
+        fit_names = {"crop": "cropped", "blur": "blurred background", "bars": "black bars"}
+        description += f", vertical {media.VERTICAL_SIZES[max_height]}x{max_height} ({fit_names[fit]})"
+    elif mode == "precise" and max_height:
         description += f", max {max_height}p"
+    if subtitle_stream is not None:
+        description += f", subtitles: {subtitle_stream.get('DisplayTitle') or 'track ' + str(subtitle_index)}"
+        if subtitle["kind"] == "text":
+            # Just the name of the style, without the description in brackets.
+            description += f" ({media.SUBTITLE_STYLES[subtitle_style]['label'].split(' (')[0]} style)"
     title = media.item_title(item)
     job = Job(
         id=job_id,
@@ -508,6 +600,7 @@ def create_clip():
         command=command,
         redacted_command=redacted,
         name=name,
+        prepare=prepare,
     )
     try:
         jobs().submit(job)

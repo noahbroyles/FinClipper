@@ -13,6 +13,9 @@ It is written in Python with Flask, and is meant to run as a Docker container on
   - **Fast** copies the original streams without re-encoding. It takes seconds and keeps full quality, but the cut has to begin on a keyframe. In MP4 output an edit list hides the extra frames, so most players still start exactly on your start point.
   - **Precise** re-encodes to H.264 and stereo AAC in an MP4 file. It is frame accurate, plays everywhere, can scale down (1080p, 720p, ...) and converts HDR to SDR.
 - Choice of audio track (or no audio) and of version, for items with several versions.
+- Burn in subtitles (precise mode). Text subtitles (SRT, ASS, WebVTT, including external subtitle files) can use one of four styles: classic white with an outline, white on a dark box, yellow, or serif. Picture subtitles (Blu-ray PGS, DVD, DVB) inside the video file are burned in as they are.
+- Vertical 9:16 clips for phones (precise mode), at 1080×1920, 720×1280 or 540×960. The picture can be cropped to fill the screen (with a slider and a guide on the preview to choose which part is kept), shown whole over a blurred copy of itself, or shown whole with black bars.
+- Optional clip names, used in the clip list and as the download file name. Clips can be renamed later.
 - Background jobs with live progress, cancel and delete. Finished clips are deleted automatically after a configurable time.
 - The browser never talks to Jellyfin directly, so Jellyfin does not need to be reachable from where you use FinClipper.
 
@@ -22,7 +25,8 @@ It is written in Python with Flask, and is meant to run as a Docker container on
 2. Library browsing and artwork go through FinClipper's JSON API, which forwards the requests to Jellyfin with your token.
 3. The preview player plays Jellyfin's own HLS stream, proxied through FinClipper. The proxy only forwards HLS playlist and segment requests, adds your token as a header, and strips any token from the playlists before they reach the browser. The preview timeline is corrected for the small video delay in Jellyfin's HLS segments, so the frame you see at a given time is exactly the frame the clip starts with.
 4. When you create a clip, FinClipper asks Jellyfin for the item again (so stream indexes and file paths never come from the browser), then runs ffmpeg in a background worker. ffmpeg reads the original file directly from disk if it can find it, or otherwise streams the original file from Jellyfin over HTTP.
-5. The finished clip is offered as a download with a readable name such as `Show - S01E02 - Title [00.12.03-00.12.45].mp4`.
+5. For burned-in text subtitles, the worker first downloads the subtitle track from Jellyfin as SRT (Jellyfin converts other text formats and caches extracted tracks), keeps the part inside the clip and writes it as an ASS file in the chosen style. Picture subtitles are read by ffmpeg straight from the video.
+6. The finished clip is offered as a download named after the clip's name if you gave it one, or otherwise with a readable name such as `Show - S01E02 - Title [00.12.03-00.12.45].mp4`.
 
 ## Quick start
 
@@ -130,7 +134,9 @@ FinClipper works behind a reverse proxy such as nginx, Caddy or Traefik:
 - Jobs are kept in memory, so the app must run as a single gunicorn worker (the included `gunicorn.conf.py` does this). Restarting the container forgets all jobs and deletes their files. Login sessions survive restarts.
 - DVD and Blu-ray folders and ISO images are not supported, only regular video files.
 - External audio files (separate `.mka`/`.ac3` next to the video) cannot be selected, only audio tracks inside the video file.
-- Subtitles are not included or burned in.
+- Subtitles can only be burned in (precise mode), not added as a separate track. The preview player does not show them.
+- Picture subtitles (PGS, DVD, DVB) must be inside the video file, and the subtitle styles only apply to text subtitles. In a vertical crop, picture subtitles are scaled down to the frame width so whole lines stay visible.
+- Styled ASS subtitles (common for anime) lose their own styling and positioning: they are converted to plain text and drawn in the chosen style.
 - HDR to SDR conversion handles HDR10 and HLG. Dolby Vision profile 5 files (without an HDR10 base layer) will have wrong colors in precise mode.
 - The preview uses Jellyfin's transcoder, with the same CPU cost as watching the video in the Jellyfin web app. When the video is already H.264 at up to 1080p and 10 Mbps, Jellyfin just repackages it.
 
@@ -160,12 +166,12 @@ finclipper/
     jellyfin.py      minimal Jellyfin API client
     api.py           JSON API, HLS preview proxy, clip endpoints
     views.py         HTML pages and /healthz
-    media.py         timestamps, stream selection, path mapping, ffmpeg command builder
+    media.py         timestamps, stream selection, path mapping, subtitle conversion, ffmpeg command builder
     jobs.py          background ffmpeg job queue
     templates/       base, login and app pages
     static/          CSS, JavaScript (no build step) and a vendored copy of hls.js 1.7.4
 tests/               unit tests and ffmpeg integration tests
-Dockerfile           python:3.13-slim-trixie with Debian's ffmpeg
+Dockerfile           python:3.13-slim-trixie with Debian's ffmpeg and the subtitle fonts
 gunicorn.conf.py     single worker, threaded
 docker-compose.yml   example deployment
 ```

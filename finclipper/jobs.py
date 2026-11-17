@@ -48,8 +48,14 @@ class Job:
     redacted_command: list
     # Optional name chosen by the user. "" means unnamed (the title is shown).
     name: str = ""
+    # Optional function run by the worker before ffmpeg starts (for example
+    # to download subtitles). If it raises, the job fails with its message.
+    prepare: object = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     status: str = QUEUED
+    # What a running job is doing: "preparing" (running prepare) or
+    # "encoding" (running ffmpeg). Empty before the job starts.
+    phase: str = ""
     progress: float = 0.0
     error: str = ""
     size: int = 0
@@ -76,6 +82,7 @@ class Job:
             "description": self.description,
             "filename": self.filename,
             "status": self.status,
+            "phase": self.phase,
             "progress": round(self.progress, 4),
             "error": self.error,
             "size": self.size,
@@ -203,10 +210,23 @@ class JobManager:
         """Path ffmpeg writes to before the clip is complete."""
         return self.clips_dir / f"{job.id}.part"
 
+    def subtitle_path(self, job):
+        """Path of the ASS file with the subtitles to burn in, if any."""
+        return self.clips_dir / self.subtitle_name(job.id)
+
+    @staticmethod
+    def subtitle_name(job_id):
+        """File name of a job's subtitle file inside the clips directory.
+
+        ffmpeg runs in the clips directory and is given this bare name,
+        which needs no escaping in the filter graph (it is hex plus .ass).
+        """
+        return f"{job_id}.ass"
+
     # ----- internals -------------------------------------------------------
 
     def _remove_files(self, job):
-        for path in (self.output_path(job), self.temp_path(job)):
+        for path in (self.output_path(job), self.temp_path(job), self.subtitle_path(job)):
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -229,11 +249,40 @@ class JobManager:
                 self._queue.task_done()
 
     def _run(self, job):
-        """Run ffmpeg for one job and record the outcome."""
+        """Prepare and run ffmpeg for one job, then record the outcome."""
+        try:
+            self._run_ffmpeg(job)
+        finally:
+            # The subtitle file is only needed while ffmpeg runs.
+            try:
+                self.subtitle_path(job).unlink(missing_ok=True)
+            except OSError:
+                log.warning("Could not remove %s", self.subtitle_path(job))
+
+    def _run_ffmpeg(self, job):
+        if job.prepare is not None:
+            job.phase = "preparing"
+            # Taken off the job so whatever it holds (such as the user's
+            # Jellyfin client and token) is not kept until the job expires.
+            prepare, job.prepare = job.prepare, None
+            try:
+                prepare()
+            except Exception as exc:
+                log.warning("Job %s failed while preparing: %s", job.id, exc)
+                self._finish(job, FAILED, str(exc) or exc.__class__.__name__)
+                return
+            if job.cancel_requested:
+                # Cancelled while preparing; there is no process to stop.
+                self._finish(job, CANCELLED, "")
+                return
+        job.phase = "encoding"
+
         stderr_tail = deque(maxlen=15)
         try:
             process = subprocess.Popen(
                 job.command,
+                # Lets the filter graph refer to the subtitle file by name.
+                cwd=self.clips_dir,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -313,7 +362,7 @@ class JobManager:
         with self._lock:
             known = set(self._jobs)
         for path in self.clips_dir.iterdir():
-            # File names are "<job id>.<ext>" or "<job id>.part".
+            # File names are "<job id>.<ext>", "<job id>.part" or "<job id>.ass".
             if path.is_file() and path.name.split(".", 1)[0] not in known:
                 try:
                     if path.stat().st_mtime < cutoff:

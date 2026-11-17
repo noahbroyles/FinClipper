@@ -5,6 +5,7 @@ Run with: python -m unittest discover -s tests
 
 import json
 import shutil
+import struct
 import tempfile
 import unittest
 import subprocess
@@ -13,6 +14,45 @@ from finclipper import media
 from finclipper.config import parse_path_map
 
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+
+def make_pgs(path, width, height, cues):
+    """Write a minimal Blu-ray PGS subtitle file (.sup) for tests.
+
+    Each cue is (start, end, (x, y, w, h)) and shows a white rectangle.
+    ffmpeg cannot encode PGS, so the segments are written by hand: a display
+    set that shows the rectangle (composition, window, palette, object,
+    end), then one with no objects that clears it. The file starts with an
+    empty display set at 0 s, because ffmpeg shifts every input file so its
+    first timestamp is 0, which would move the first cue.
+    """
+
+    def segment(seconds, kind, payload):
+        # "PG", PTS and DTS in 90 kHz units, segment type, payload size.
+        return b"PG" + struct.pack(">IIBH", round(seconds * 90000), 0, kind, len(payload)) + payload
+
+    def composition(number, state, rect):
+        objects = struct.pack(">HBBHH", 0, 0, 0, rect[0], rect[1]) if state else b""
+        # Size, frame rate code, number, state, palette update, palette id, object count.
+        return struct.pack(">HHBHBBBB", width, height, 0x10, number, state, 0, 0, 1 if state else 0) + objects
+
+    empty_window = struct.pack(">BBHHHH", 1, 0, 0, 0, width, height)
+    data = segment(0, 0x16, composition(0, 0x00, None)) + segment(0, 0x17, empty_window) + segment(0, 0x80, b"")
+    for number, (start, end, rect) in enumerate(cues, start=1):
+        x, y, w, h = rect
+        window = struct.pack(">BBHHHH", 1, 0, x, y, w, h)
+        # One palette entry: index 1 is opaque white (Y, Cr, Cb, alpha).
+        palette = struct.pack(">BB", 0, 0) + bytes([1, 235, 128, 128, 255])
+        # Run-length data: per line, a run of w pixels of colour 1, then end of line.
+        line = bytes([0, 0xC0 | (w >> 8), w & 0xFF, 1, 0, 0])
+        bitmap = struct.pack(">HH", w, h) + line * h
+        obj = struct.pack(">HBB", 0, 0, 0xC0) + len(bitmap).to_bytes(3, "big") + bitmap
+        data += segment(start, 0x16, composition(number * 2, 0x80, rect))
+        data += segment(start, 0x17, window) + segment(start, 0x14, palette)
+        data += segment(start, 0x15, obj) + segment(start, 0x80, b"")
+        data += segment(end, 0x16, composition(number * 2 + 1, 0x00, rect))
+        data += segment(end, 0x17, window) + segment(end, 0x80, b"")
+    Path(path).write_bytes(data)
 
 
 class ParseTimestampTests(unittest.TestCase):
@@ -122,6 +162,67 @@ class StreamSelectionTests(unittest.TestCase):
         self.assertIsNone(media.source_problem(dict(self.source, VideoType="VideoFile")))
 
 
+class SubtitleTests(unittest.TestCase):
+    def test_subtitle_kinds(self):
+        self.assertEqual(media.subtitle_kind({"Codec": "PGSSUB"}), "bitmap")
+        self.assertEqual(media.subtitle_kind({"Codec": "dvdsub"}), "bitmap")
+        # Picture subtitles must be inside the video file for ffmpeg to read.
+        self.assertIsNone(media.subtitle_kind({"Codec": "PGSSUB", "IsExternal": True}))
+        self.assertEqual(media.subtitle_kind({"Codec": "subrip", "IsTextSubtitleStream": True}), "text")
+        self.assertEqual(media.subtitle_kind({"Codec": "ass", "IsTextSubtitleStream": True, "IsExternal": True}), "text")
+        self.assertIsNone(media.subtitle_kind({"Codec": "eia_608", "IsTextSubtitleStream": False}))
+
+    def test_subtitle_streams_in_summary(self):
+        source = {
+            "MediaStreams": [
+                {"Type": "Video", "Index": 0, "Codec": "h264"},
+                {"Type": "Subtitle", "Index": 2, "Codec": "subrip", "IsTextSubtitleStream": True, "DisplayTitle": "English"},
+                {"Type": "Subtitle", "Index": 3, "Codec": "PGSSUB", "Language": "jpn"},
+                {"Type": "Subtitle", "Index": 4, "Codec": "PGSSUB", "IsExternal": True},
+            ]
+        }
+        self.assertEqual(
+            media.summarize_source(source)["subtitles"],
+            [{"index": 2, "title": "English", "kind": "text"}, {"index": 3, "title": "jpn", "kind": "bitmap"}],
+        )
+
+    def test_parse_srt(self):
+        text = (
+            "﻿1\r\n00:00:01,000 --> 00:00:02,500\r\nHello\r\nthere\r\n\r\n"
+            "2\n00:00:03.5 --> 00:00:04.25\nShort millis\n\n"
+            "3\n00:00:05,000 --> 00:00:06,000\n\n"
+            "4\n00:00:08,000 --> 00:00:07,000\nEnds before it starts\n"
+        )
+        self.assertEqual(media.parse_srt(text), [(1.0, 2.5, ["Hello", "there"]), (3.5, 4.25, ["Short millis"])])
+
+    def test_build_ass_trims_and_shifts(self):
+        srt = (
+            "1\n00:00:01,000 --> 00:00:02,000\nBefore the clip\n\n"
+            "2\n00:00:09,000 --> 00:00:11,000\nAlready showing\n\n"
+            "3\n00:00:12,000 --> 00:00:13,500\n<i>Inside</i> {laughs} {\\an8}<font color=red>top</font>\n\n"
+            "4\n00:00:19,000 --> 00:00:25,000\nRuns past the end\n\n"
+            "5\n00:00:30,000 --> 00:00:31,000\nAfter the clip\n"
+        )
+        ass = media.build_ass(srt, 10, 20, "classic", "horizontal")
+        events = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+        self.assertEqual(events, [
+            "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Already showing",
+            "Dialogue: 0,0:00:02.00,0:00:03.50,Default,,0,0,0,,{\\i1}Inside{\\i0} (laughs) {\\an8}top",
+            "Dialogue: 0,0:00:09.00,0:00:10.00,Default,,0,0,0,,Runs past the end",
+        ])
+        self.assertIn("PlayResY: 1080", ass)
+        self.assertIn("Style: Default,Liberation Sans,56,", ass)
+
+    def test_build_ass_vertical_canvas_and_line_breaks(self):
+        ass = media.build_ass("1\n00:00:00,000 --> 00:00:01,000\nOne\nTwo\n", 0, 5, "boxed", "vertical")
+        self.assertIn("PlayResX: 1080", ass)
+        self.assertIn("PlayResY: 1920", ass)
+        self.assertIn(",,One\\NTwo", ass)
+        # Box padding grows with the font size on the vertical canvas.
+        style = next(line for line in ass.splitlines() if line.startswith("Style:")).split(",")
+        self.assertEqual((style[1], style[15], style[16]), ("DejaVu Sans", "3", "11.8"))
+
+
 class PathMapTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -189,6 +290,45 @@ class PlanAndCommandTests(unittest.TestCase):
         self.assertIn("-c:a aac -b:a 384k", joined)
         self.assertNotIn("avoid_negative_ts", joined)
         self.assertEqual(cmd[-3:], ["-f", "mp4", "/o/x.part"])
+
+    def test_layout_and_subtitles_need_precise_mode(self):
+        plan = media.plan_output("fast", self.video, None)
+        with self.assertRaises(ValueError):
+            media.build_ffmpeg_command("/m/in.mkv", 0, 5, self.video, None, "fast", 0, "/o/x.part", plan, layout="vertical")
+        with self.assertRaises(ValueError):
+            media.build_ffmpeg_command(
+                "/m/in.mkv", 0, 5, self.video, None, "fast", 0, "/o/x.part", plan, subtitle={"kind": "bitmap", "index": 2}
+            )
+
+    def test_vertical_crop_graph(self):
+        plan = media.plan_output("precise", self.video, None)
+        cmd = media.build_ffmpeg_command(
+            "/m/in.mkv", 0, 5, self.video, None, "precise", 1280, "/o/x.part", plan, layout="vertical", fit="crop", crop_x=0.25
+        )
+        graph = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn(":x='(iw-ow)*0.2500'", graph)
+        self.assertIn("scale=720:1280", graph)
+        self.assertTrue(graph.endswith("[vout]"))
+        self.assertEqual(cmd[cmd.index("[vout]") - 1], "-map")
+
+    def test_text_subtitle_file_must_be_a_plain_name(self):
+        plan = media.plan_output("precise", self.video, None)
+        for name in ("/data/clips/x.ass", "a:b.ass", "x'.ass", "a,b.ass"):
+            with self.assertRaises(ValueError):
+                media.build_ffmpeg_command(
+                    "/m/in.mkv", 0, 5, self.video, None, "precise", 0, "/o/x.part", plan,
+                    subtitle={"kind": "text", "file": name},
+                )
+
+    def test_bitmap_subtitles_read_from_input(self):
+        plan = media.plan_output("precise", self.video, None)
+        video = dict(self.video, Width=1920)
+        cmd = media.build_ffmpeg_command(
+            "/m/in.mkv", 0, 5, video, None, "precise", 0, "/o/x.part", plan, subtitle={"kind": "bitmap", "index": 3}
+        )
+        graph = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("[0:3]scale=w=1920:h=-2[subs]", graph)
+        self.assertIn("overlay=x=(W-w)/2:y=H-h", graph)
 
     def test_http_headers_come_before_input(self):
         plan = media.plan_output("precise", self.video, None)
@@ -275,6 +415,115 @@ class FfmpegIntegrationTests(unittest.TestCase):
     def test_mkv_fallback(self):
         info = self.run_clip("fast", 0, {"Index": 0, "Codec": "vc1"}, {"Index": 1, "Codec": "ac3"}, "mkv.part")
         self.assertIn("matroska", info["format"]["format_name"])
+
+
+@unittest.skipUnless(HAVE_FFMPEG, "ffmpeg is not installed")
+class LayoutAndSubtitleIntegrationTests(unittest.TestCase):
+    """Vertical layouts and burned-in subtitles, run through ffmpeg.
+
+    The source is plain grey, so any near-white pixels in the output must
+    be subtitles. Both subtitle tracks show from 2 s to 3 s of the source,
+    and clips start at 1.5 s, so they should appear 0.5 s to 1.5 s in.
+    """
+
+    video = {"Index": 0, "Codec": "h264", "Width": 640, "Height": 360}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+        cls.src = cls.tmp / "grey.mkv"
+        sup = cls.tmp / "subs.sup"
+        # A white bar near the bottom of the 640x360 picture subtitle canvas.
+        make_pgs(sup, 640, 360, [(2.0, 3.0, (160, 300, 320, 40))])
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=gray:size=640x360:rate=25:duration=6",
+                "-i", str(sup), "-map", "0", "-map", "1",
+                "-c:v", "libx264", "-preset", "ultrafast", "-g", "50", "-pix_fmt", "yuv420p",
+                "-c:s", "copy", str(cls.src),
+            ],
+            check=True,
+        )
+        cls.srt = "1\n00:00:02,000 --> 00:00:03,000\nSUBTITLE TEXT HERE\n"
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def run_clip(self, name, layout="horizontal", fit="crop", max_height=0, subtitle=None):
+        plan = media.plan_output("precise", self.video, None)
+        out = self.tmp / f"{name}.mp4"
+        cmd = media.build_ffmpeg_command(
+            self.src, 1.5, 2.5, self.video, None, "precise", max_height, out, plan,
+            preset="ultrafast", layout=layout, fit=fit, subtitle=subtitle,
+        )
+        # The app runs ffmpeg in the clips directory; text subtitle files are
+        # referred to by name relative to it.
+        result = subprocess.run(cmd, cwd=self.tmp, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return out
+
+    def size(self, path):
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,sample_aspect_ratio",
+             "-of", "json", str(path)],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        stream = json.loads(out)["streams"][0]
+        return stream["width"], stream["height"], stream.get("sample_aspect_ratio", "1:1")
+
+    def bright_pixels(self, path, time, top=0.0, bottom=1.0):
+        """Count near-white pixels between two heights (fractions of the frame) at a time."""
+        width, height, _ = self.size(path)
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", str(time), "-i", str(path), "-frames:v", "1",
+             "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+            check=True, capture_output=True,
+        ).stdout
+        rows = raw[int(top * height) * width:int(bottom * height) * width]
+        return sum(1 for value in rows if value > 200)
+
+    def assert_shown_only_during_cue(self, path, top=0.0, bottom=1.0):
+        self.assertEqual(self.bright_pixels(path, 0.2, top, bottom), 0)
+        # Text is only about 19 px tall on a 360 px frame, and the thin serif
+        # style has a few hundred white pixels; anything clearly above zero
+        # shows the subtitle was drawn.
+        self.assertGreater(self.bright_pixels(path, 1.0, top, bottom), 100)
+        self.assertEqual(self.bright_pixels(path, 2.0, top, bottom), 0)
+
+    def write_ass(self, name, layout, style="classic"):
+        (self.tmp / name).write_text(media.build_ass(self.srt, 1.5, 4.0, style, layout), encoding="utf-8")
+        return {"kind": "text", "file": name}
+
+    def test_vertical_sizes(self):
+        for fit in sorted(media.VERTICAL_FITS):
+            with self.subTest(fit=fit):
+                out = self.run_clip(f"vertical-{fit}", layout="vertical", fit=fit, max_height=960)
+                self.assertEqual(self.size(out), (540, 960, "1:1"))
+
+    def test_text_subtitles_horizontal(self):
+        for style in media.SUBTITLE_STYLES:
+            with self.subTest(style=style):
+                out = self.run_clip(f"text-{style}", subtitle=self.write_ass(f"text-{style}.ass", "horizontal", style))
+                self.assert_shown_only_during_cue(out, top=0.6)
+
+    def test_text_subtitles_vertical(self):
+        out = self.run_clip("text-vertical", "vertical", "blur", 960, self.write_ass("text-vertical.ass", "vertical"))
+        # The vertical canvas puts the text about a fifth of the way up.
+        self.assert_shown_only_during_cue(out, top=0.6, bottom=0.85)
+
+    def test_bitmap_subtitles_horizontal(self):
+        out = self.run_clip("bitmap", subtitle={"kind": "bitmap", "index": 1})
+        # The white bar covers rows 300 to 340 of 360.
+        self.assert_shown_only_during_cue(out, top=0.82, bottom=0.95)
+
+    def test_bitmap_subtitles_vertical_crop(self):
+        out = self.run_clip("bitmap-crop", "vertical", "crop", 960, {"kind": "bitmap", "index": 1})
+        # The canvas is scaled to 540x304 with its bottom at 78% of 960, which
+        # puts the bar at about rows 698 to 732: the whole bar, not cropped.
+        self.assert_shown_only_during_cue(out, top=0.72, bottom=0.77)
+        self.assertGreater(self.bright_pixels(out, 1.0, top=0.72, bottom=0.77), 270 * 30)
 
 
 class PlaylistRewriteTests(unittest.TestCase):

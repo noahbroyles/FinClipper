@@ -22,6 +22,10 @@ const MP4_AUDIO_COPY = new Set(["aac", "mp3", "ac3", "eac3"]);
 // Longest clip name. Must match MAX_CLIP_NAME_LENGTH in finclipper/media.py.
 const CLIP_NAME_MAX = 100;
 
+// Vertical (9:16) output sizes as [height, width]. The height is sent as
+// max_height. Must match VERTICAL_SIZES in finclipper/media.py.
+const VERTICAL_SIZES = [[1920, 1080], [1280, 720], [960, 540]];
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -407,6 +411,8 @@ function jobStatusText(job) {
         case "queued":
             return "Waiting in queue...";
         case "running":
+            // "preparing" is the subtitle download before ffmpeg starts.
+            if (job.phase === "preparing") return "Preparing subtitles...";
             return `Cutting... ${Math.round(job.progress * 100)}%`;
         case "done":
             return `Ready · ${fmtBytes(job.size)}`;
@@ -667,6 +673,14 @@ async function viewEditor(nav, itemId) {
         // exactly what was on screen. Measured from the first fragment.
         offset: 0,
         offsetMeasured: false,
+        // Shape of the clip: "horizontal" (like the source) or "vertical"
+        // (9:16). fit says how the picture fills a vertical frame and cropX
+        // (0 = left edge, 1 = right edge) where a crop sits.
+        layout: "horizontal",
+        fit: "crop",
+        cropX: 0.5,
+        // Stream index of the subtitles to burn in, or null for none.
+        subtitleIndex: null,
     };
     ed.end = Math.min(ed.duration, 30);
 
@@ -938,6 +952,40 @@ async function viewEditor(nav, itemId) {
     const preciseRadio = el("input", { type: "radio", name: modeName, value: "precise" });
     const heightSelect = el("select", {});
     const heightField = el("label", { class: "field hidden" }, el("span", {}, "Resolution"), heightSelect);
+    // Shown when Fast mode is unavailable because of the options below.
+    const modeNote = el(
+        "p",
+        { class: "output-note hidden" },
+        "Fast mode copies the video as it is, so it cannot add subtitles or change the shape. Precise mode is used.",
+    );
+
+    const subtitleSelect = el("select", {});
+    const styleSelect = el(
+        "select",
+        {},
+        app.me.subtitle_styles.map((style) => el("option", { value: style.id }, style.label)),
+    );
+    const styleField = el("label", { class: "field hidden" }, el("span", {}, "Subtitle style"), styleSelect);
+    const subtitleNote = el("p", { class: "output-note hidden" });
+
+    const layoutName = `layout-${randomHex(4)}`;
+    const horizontalRadio = el("input", { type: "radio", name: layoutName, value: "horizontal", checked: true });
+    const verticalRadio = el("input", { type: "radio", name: layoutName, value: "vertical" });
+    const fitSelect = el(
+        "select",
+        {},
+        el("option", { value: "crop" }, "Crop to fill the screen"),
+        el("option", { value: "blur" }, "Whole picture, blurred background"),
+        el("option", { value: "bars" }, "Whole picture, black bars"),
+    );
+    const fitField = el("label", { class: "field hidden" }, el("span", {}, "Framing"), fitSelect);
+    const cropSlider = el("input", { type: "range", min: "0", max: "100", step: "1", value: "50" });
+    const cropField = el(
+        "label",
+        { class: "field hidden" },
+        el("span", {}, "Crop position (shown on the preview)"),
+        cropSlider,
+    );
     const outputNote = el("p", { class: "output-note" });
     // Optional clip name. Left empty, the clip is named after the video.
     const nameInput = el("input", {
@@ -957,7 +1005,15 @@ async function viewEditor(nav, itemId) {
         audioSelect.replaceChildren(...options);
     }
 
+    // Horizontal clips offer a maximum height (never above the source);
+    // vertical clips offer fixed phone screen sizes.
     function fillHeightOptions() {
+        if (ed.layout === "vertical") {
+            heightSelect.replaceChildren(
+                ...VERTICAL_SIZES.map(([height, width]) => el("option", { value: String(height) }, `${width} × ${height}`)),
+            );
+            return;
+        }
         const sourceHeight = (ed.source.video && ed.source.video.height) || 0;
         const options = [el("option", { value: "0" }, sourceHeight ? `Original (${sourceHeight}p)` : "Original")];
         for (const height of [2160, 1440, 1080, 720, 480, 360]) {
@@ -966,8 +1022,48 @@ async function viewEditor(nav, itemId) {
         heightSelect.replaceChildren(...options);
     }
 
+    // Subtitle tracks of the selected version. Indexes differ between
+    // versions, so switching version resets the choice to none.
+    function fillSubtitleOptions() {
+        ed.subtitleIndex = null;
+        const tracks = ed.source.subtitles || [];
+        const options = [el("option", { value: "" }, tracks.length ? "None" : "None (this video has no subtitles)")];
+        for (const track of tracks) {
+            options.push(el("option", { value: String(track.index) }, track.kind === "bitmap" ? `${track.title} (picture)` : track.title));
+        }
+        subtitleSelect.replaceChildren(...options);
+        subtitleSelect.disabled = !tracks.length;
+    }
+
+    function selectedSubtitle() {
+        return (ed.source.subtitles || []).find((track) => track.index === ed.subtitleIndex) || null;
+    }
+
     function selectedMode() {
         return preciseRadio.checked ? "precise" : "fast";
+    }
+
+    // Show the fields that apply to the current choices, and switch to
+    // Precise mode when subtitles or a vertical shape are chosen, since Fast
+    // mode copies the video untouched and can do neither.
+    function updateOptions() {
+        const subtitle = selectedSubtitle();
+        const needsPrecise = ed.layout === "vertical" || subtitle !== null;
+        if (needsPrecise) preciseRadio.checked = true;
+        fastRadio.disabled = needsPrecise;
+        modeNote.classList.toggle("hidden", !needsPrecise);
+
+        styleField.classList.toggle("hidden", !subtitle || subtitle.kind !== "text");
+        subtitleNote.classList.toggle("hidden", !subtitle);
+        if (subtitle) {
+            subtitleNote.textContent = subtitle.kind === "bitmap"
+                ? "Picture subtitles keep their original look. The preview player does not show subtitles."
+                : "The preview player does not show subtitles.";
+        }
+        fitField.classList.toggle("hidden", ed.layout !== "vertical");
+        cropField.classList.toggle("hidden", ed.layout !== "vertical" || ed.fit !== "crop");
+        updateCropGuide();
+        updateOutputNote();
     }
 
     // Describe the output before it is made (mirrors plan_output in media.py).
@@ -975,7 +1071,9 @@ async function viewEditor(nav, itemId) {
         const precise = selectedMode() === "precise";
         heightField.classList.toggle("hidden", !precise);
         if (precise) {
-            outputNote.textContent = "Output: H.264 video with stereo AAC audio in an MP4 file.";
+            const shape = ed.layout === "vertical" ? "vertical (9:16) " : "";
+            const subtitles = selectedSubtitle() ? ", with the subtitles burned in" : "";
+            outputNote.textContent = `Output: ${shape}H.264 video with stereo AAC audio in an MP4 file${subtitles}.`;
             return;
         }
         const videoCodec = ((ed.source.video && ed.source.video.codec) || "").toLowerCase();
@@ -1000,7 +1098,8 @@ async function viewEditor(nav, itemId) {
         setEnd(ed.end);
         fillAudioOptions();
         fillHeightOptions();
-        updateOutputNote();
+        fillSubtitleOptions();
+        updateOptions();
         startPreview(resumeAt);
     });
 
@@ -1018,6 +1117,70 @@ async function viewEditor(nav, itemId) {
 
     fastRadio.addEventListener("change", updateOutputNote);
     preciseRadio.addEventListener("change", updateOutputNote);
+
+    subtitleSelect.addEventListener("change", () => {
+        ed.subtitleIndex = subtitleSelect.value === "" ? null : Number(subtitleSelect.value);
+        updateOptions();
+    });
+
+    for (const radio of [horizontalRadio, verticalRadio]) {
+        radio.addEventListener("change", () => {
+            ed.layout = verticalRadio.checked ? "vertical" : "horizontal";
+            fillHeightOptions();
+            updateOptions();
+        });
+    }
+
+    fitSelect.addEventListener("change", () => {
+        ed.fit = fitSelect.value;
+        updateOptions();
+    });
+
+    cropSlider.addEventListener("input", () => {
+        ed.cropX = Number(cropSlider.value) / 100;
+        updateCropGuide();
+    });
+
+    // ----- crop guide -----
+
+    // Outline of the 9:16 area a vertical crop keeps, drawn over the preview
+    // with the rest dimmed. It ignores the pointer so the video controls
+    // underneath keep working.
+    const cropWindow = el("div", { class: "crop-window" });
+    const cropGuide = el("div", { class: "crop-guide hidden" }, cropWindow);
+
+    function updateCropGuide() {
+        const visible = ed.layout === "vertical" && ed.fit === "crop";
+        cropGuide.classList.toggle("hidden", !visible);
+        if (!visible) return;
+        // Where the picture is drawn inside the video element, which keeps
+        // the picture's shape and centres it (16:9 until the stream loads).
+        const boxW = video.clientWidth;
+        const boxH = video.clientHeight;
+        const sourceW = video.videoWidth || 16;
+        const sourceH = video.videoHeight || 9;
+        const scale = Math.min(boxW / sourceW, boxH / sourceH);
+        const picW = sourceW * scale;
+        const picH = sourceH * scale;
+        cropGuide.style.left = `${(boxW - picW) / 2}px`;
+        cropGuide.style.top = `${(boxH - picH) / 2}px`;
+        cropGuide.style.width = `${picW}px`;
+        cropGuide.style.height = `${picH}px`;
+        // Same as the crop filter in media.py: the largest 9:16 area,
+        // placed by cropX, and centred vertically in taller pictures.
+        const cropW = Math.min(picW, (picH * 9) / 16);
+        const cropH = Math.min(picH, (picW * 16) / 9);
+        cropWindow.style.width = `${cropW}px`;
+        cropWindow.style.height = `${cropH}px`;
+        cropWindow.style.left = `${(picW - cropW) * ed.cropX}px`;
+        cropWindow.style.top = `${(picH - cropH) / 2}px`;
+    }
+
+    video.addEventListener("loadedmetadata", updateCropGuide);
+    // The player resizes with the window and the layout.
+    const resizeObserver = new ResizeObserver(updateCropGuide);
+    resizeObserver.observe(video);
+    onLeave(() => resizeObserver.disconnect());
 
     // ----- range display and validation -----
 
@@ -1065,6 +1228,11 @@ async function viewEditor(nav, itemId) {
                     audio_index: ed.audioIndex,
                     max_height: selectedMode() === "precise" ? Number(heightSelect.value) : 0,
                     name: nameInput.value,
+                    layout: ed.layout,
+                    fit: ed.fit,
+                    crop_x: ed.cropX,
+                    subtitle_index: ed.subtitleIndex,
+                    subtitle_style: styleSelect.value,
                 },
             });
             jobList.add(job);
@@ -1161,6 +1329,22 @@ async function viewEditor(nav, itemId) {
         el("h3", {}, "Options"),
         sources.length > 1 ? el("label", { class: "field" }, el("span", {}, "Version"), versionSelect) : null,
         el("label", { class: "field" }, el("span", {}, "Audio track"), audioSelect),
+        el("label", { class: "field" }, el("span", {}, "Burn in subtitles"), subtitleSelect),
+        styleField,
+        subtitleNote,
+        el(
+            "div",
+            { class: "field" },
+            el("span", {}, "Shape"),
+            el(
+                "div",
+                { class: "segmented" },
+                el("label", {}, horizontalRadio, el("span", {}, "Horizontal")),
+                el("label", {}, verticalRadio, el("span", {}, "Vertical (phone)")),
+            ),
+        ),
+        fitField,
+        cropField,
         el(
             "div",
             { class: "field" },
@@ -1192,6 +1376,7 @@ async function viewEditor(nav, itemId) {
                 ),
             ),
         ),
+        modeNote,
         heightField,
         el("label", { class: "field" }, el("span", {}, "Clip name"), nameInput),
         outputNote,
@@ -1206,7 +1391,7 @@ async function viewEditor(nav, itemId) {
             el(
                 "div",
                 {},
-                el("div", { class: "player" }, video),
+                el("div", { class: "player" }, video, cropGuide),
                 playerError,
                 timeline,
                 el(
@@ -1246,7 +1431,8 @@ async function viewEditor(nav, itemId) {
 
     fillAudioOptions();
     fillHeightOptions();
-    updateOutputNote();
+    fillSubtitleOptions();
+    updateOptions();
     updateRange();
     startPreview(0);
     jobList.refresh();
