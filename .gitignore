@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .venv/
 data/
+# The web UI: installed packages and the bundles built from frontend/src.
+node_modules/
+finclipper/static/dist/

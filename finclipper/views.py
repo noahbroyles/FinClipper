@@ -1,4 +1,4 @@
-"""HTML pages. The app itself is a single page driven by static/js/app.js."""
+"""HTML pages. The app itself is a single page drawn by the Preact app in frontend/."""
 
 from .auth import is_logged_in, login_required_page
 from flask import Blueprint, redirect, render_template, url_for

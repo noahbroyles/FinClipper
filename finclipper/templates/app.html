@@ -1,25 +1,6 @@
 {% extends "base.html" %}
 {% block body %}
-<header class="topbar">
-    <a class="brand" href="#/">
-        <img src="{{ url_for('static', filename='favicon.svg') }}" alt="">
-        <span>FinClipper</span>
-    </a>
-    <nav>
-        <a href="#/" data-nav="home">Libraries</a>
-        <a href="#/clips" data-nav="clips">My clips</a>
-        <a href="#/public" data-nav="public">Public clips</a>
-    </nav>
-    <form class="search" id="search-form" role="search">
-        <input type="search" id="search-input" placeholder="Search movies and shows" aria-label="Search">
-    </form>
-    <div class="user">
-        <span class="name" id="user-name"></span>
-        <button class="btn small" id="logout" type="button">Sign out</button>
-    </div>
-</header>
-<main id="view"></main>
-<div class="toast hidden" id="toast" role="status"></div>
-<script src="{{ url_for('static', filename='vendor/hls.min.js') }}"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}?v={{ version }}"></script>
+{# The page is drawn by the Preact app in frontend/src, built into static/dist. #}
+<div id="app"></div>
+<script type="module" src="{{ url_for('static', filename='dist/app.js') }}?v={{ version }}"></script>
 {% endblock %}

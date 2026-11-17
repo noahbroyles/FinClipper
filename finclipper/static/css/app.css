@@ -414,8 +414,9 @@ main {
     aspect-ratio: 16 / 9;
 }
 
-/* Covers the picture area of the video; app.js sets its position and size.
-   It ignores the pointer so the video controls underneath keep working. */
+/* Covers the picture area of the video; the CropGuide component sets its
+   position and size. It ignores the pointer so the video controls
+   underneath keep working. */
 .crop-guide {
     position: absolute;
     overflow: hidden;

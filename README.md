@@ -2,7 +2,7 @@
 
 FinClipper is a small web app for cutting clips out of the movies and episodes in your Jellyfin library. You sign in with your Jellyfin account, pick a video, mark a start and end point on a preview player, and FinClipper uses ffmpeg on the server to cut that range into a file you can download.
 
-It is written in Python with Flask, and is meant to run as a Docker container on the same machine as Jellyfin.
+The server is written in Python with Flask and the web UI in TypeScript with Preact. It is meant to run as a Docker container on the same machine as Jellyfin.
 
 ## Features
 
@@ -144,7 +144,17 @@ FinClipper works behind a reverse proxy such as nginx, Caddy or Traefik:
 
 ## Development
 
-Requires Python 3.12 or newer and ffmpeg on the `PATH`.
+Requires Python 3.12 or newer, ffmpeg on the `PATH`, and [bun](https://bun.sh) to build the web UI. (The Docker image builds the web UI itself, so bun is only needed for development.)
+
+The web UI lives in `frontend/` and is bundled into `finclipper/static/dist/`, which is not kept in git. Build it once before starting the server:
+
+```sh
+cd frontend
+bun install
+bun run build
+```
+
+Then start the server:
 
 ```sh
 python3 -m venv .venv
@@ -152,10 +162,19 @@ python3 -m venv .venv
 JELLYFIN_URL=http://localhost:8096 DATA_DIR=./data .venv/bin/flask --app wsgi run --debug --port 8080
 ```
 
-Run the tests (the ffmpeg integration tests are skipped if ffmpeg is not installed):
+While working on the web UI, run `bun run dev` in `frontend/` instead of `bun run build`. It rebuilds the bundles whenever a source file changes (unminified, with source maps); reload the page to see the change.
+
+Run the server tests (the ffmpeg integration tests are skipped if ffmpeg is not installed):
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -v
+```
+
+Check and test the web UI, from `frontend/`. `bun run build` does not check types, so run the type check before committing (the GitHub workflow runs both, and does not build the image if either fails):
+
+```sh
+bun run typecheck
+bun test
 ```
 
 ### Project layout
@@ -171,10 +190,22 @@ finclipper/
     media.py         timestamps, stream selection, path mapping, subtitle conversion, ffmpeg command builder
     jobs.py          background ffmpeg job queue, expiry and sharing
     store.py         SQLite storage for clip records
-    templates/       base, login and app pages
-    static/          CSS, JavaScript (no build step) and a vendored copy of hls.js 1.7.4
-tests/               unit tests and ffmpeg integration tests
-Dockerfile           python:3.13-slim-trixie with Debian's ffmpeg and the subtitle fonts
+    templates/       page shells that load the web UI
+    static/          CSS, and dist/ with the built web UI
+frontend/            the web UI: Preact and TypeScript, built with bun
+    package.json     dependencies (preact, hls.js) and the build, dev, typecheck and test scripts
+    src/
+        app.tsx      entry point of the app page
+        login.tsx    entry point of the sign in page
+        types.ts     shapes of the API's JSON
+        constants.ts values that must match media.py
+        lib/         API client, hash router, formatting, toast messages
+        hooks/       data loading, clip list polling and other shared hooks
+        components/  top bar, item cards, clip list and other shared components
+        views/       one component per page (libraries, browse, series, search, my clips, public clips)
+        views/editor/  the clip editor: preview player, timeline, time controls, options panel
+tests/               server unit tests and ffmpeg integration tests
+Dockerfile           builds the web UI with bun, then python:3.13-slim-trixie with Debian's ffmpeg and the subtitle fonts
 gunicorn.conf.py     single worker, threaded
 docker-compose.yml   example deployment
 ```

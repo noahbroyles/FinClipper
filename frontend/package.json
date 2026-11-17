@@ -1,0 +1,19 @@
+{
+  "name": "finclipper-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build ./src/app.tsx ./src/login.tsx --outdir ../finclipper/static/dist --target browser --minify",
+    "dev": "bun build ./src/app.tsx ./src/login.tsx --outdir ../finclipper/static/dist --target browser --sourcemap=inline --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "hls.js": "1.7.4",
+    "preact": "11.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.4",
+    "typescript": "7.0.2"
+  }
+}

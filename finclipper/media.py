@@ -25,7 +25,7 @@ ALLOWED_HEIGHTS = {0, 2160, 1440, 1080, 720, 480, 360}
 
 # Vertical (9:16, phone screen) output sizes, as {height: width}. The height
 # is what the API receives as max_height for a vertical clip. Must match
-# VERTICAL_SIZES in app.js.
+# VERTICAL_SIZES in frontend/src/constants.ts.
 VERTICAL_SIZES = {1920: 1080, 1280: 720, 960: 540}
 
 # How a horizontal picture is fitted into a vertical frame:
@@ -103,7 +103,8 @@ SUBTITLE_CANVAS = {
 # Characters that are not allowed in file names on common filesystems.
 _UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*]')
 
-# Longest name a user may give a clip. Must match CLIP_NAME_MAX in app.js.
+# Longest name a user may give a clip. Must match CLIP_NAME_MAX in
+# frontend/src/constants.ts.
 MAX_CLIP_NAME_LENGTH = 100
 
 # Accepts "SS", "SS.mmm", "MM:SS(.mmm)" and "HH:MM:SS(.mmm)".

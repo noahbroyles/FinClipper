@@ -10,6 +10,7 @@ def create_app():
     import logging
     from .api import api
     from flask import Flask
+    from pathlib import Path
     from .views import views
     from .config import Config
     from .jobs import JobManager
@@ -37,6 +38,12 @@ def create_app():
     )
     manager.start()
     app.extensions["finclipper_jobs"] = manager
+
+    if not (Path(app.static_folder) / "dist" / "app.js").is_file():
+        # The web UI is built from frontend/ and is not kept in git.
+        app.logger.warning(
+            "The web UI has not been built, so pages will be blank. Run \"bun install\" and \"bun run build\" in frontend/."
+        )
 
     app.register_blueprint(views)
     app.register_blueprint(api)

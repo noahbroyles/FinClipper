@@ -1,3 +1,19 @@
+# Build the web UI (Preact and TypeScript, in frontend/) with bun. The result
+# is plain JavaScript that is the same for every CPU, so this stage always
+# runs on the build machine's own architecture, even when the image is being
+# built for another one.
+FROM --platform=$BUILDPLATFORM oven/bun:1.4 AS frontend
+
+WORKDIR /src/frontend
+
+COPY frontend/package.json frontend/bun.lock ./
+RUN bun install --frozen-lockfile
+
+# "bun run build" writes the bundles to ../finclipper/static/dist.
+COPY frontend ./
+RUN bun run build
+
+
 FROM python:3.13-slim-trixie
 
 # ffmpeg cuts the clips. tini runs as PID 1 so signals reach gunicorn and
@@ -19,6 +35,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY finclipper ./finclipper
+COPY --from=frontend /src/finclipper/static/dist ./finclipper/static/dist
 COPY wsgi.py gunicorn.conf.py ./
 
 # Run as an unprivileged user. Override with "user:" in compose if your

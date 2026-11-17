@@ -7,3 +7,6 @@ tests
 **/*.pyc
 docker-compose.yml
 README.md
+# The image builds the web UI itself (see the first stage in the Dockerfile).
+**/node_modules
+finclipper/static/dist
