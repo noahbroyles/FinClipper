@@ -15,7 +15,8 @@ interface Props {
 
 // The full length of the video as a bar, with the clip's parts as blocks
 // on it, a draggable handle at each end of the selected part, and the
-// playback position.
+// playback position: a line that reaches below the bar and ends in a round
+// grip, so it can be dragged without catching a handle.
 export function Timeline({ parts, controls, player }: Props) {
     const track = useRef<HTMLDivElement>(null);
     const startHandle = useRef<HTMLDivElement>(null);
@@ -23,6 +24,10 @@ export function Timeline({ parts, controls, player }: Props) {
     const playhead = useRef<HTMLDivElement>(null);
     const playheadLabel = useRef<HTMLSpanElement>(null);
     const duration = useLatest(parts.duration);
+    // True while the playhead is being dragged. The player only seeks when
+    // the drag ends, so until then the playhead shows where the pointer is,
+    // not where the player is.
+    const scrubbing = useRef(false);
 
     const at = (time: number) => timelinePercent(time, parts.duration);
     const selected = parts.list[parts.selected]!;
@@ -30,20 +35,20 @@ export function Timeline({ parts, controls, player }: Props) {
 
     function movePlayhead(time: number): void {
         if (playhead.current) playhead.current.style.left = timelinePercent(time, duration.current);
+        if (playheadLabel.current) playheadLabel.current.textContent = `Playhead ${fmtTime(time)}`;
     }
 
     // The playhead follows playback on every frame. It is moved directly
     // rather than through state, which would redraw the editor 60 times a
     // second.
     useAnimationFrame(() => {
-        const now = player.sourceTime();
-        movePlayhead(now);
-        if (playheadLabel.current) playheadLabel.current.textContent = `Playhead ${fmtTime(now)}`;
+        if (!scrubbing.current) movePlayhead(player.sourceTime());
     });
 
     // Pointer events cover mouse, touch and pen. Dragging a handle moves the
-    // start or end of the selected part; pressing anywhere else on the track
-    // seeks the player, and on another part's block also selects that part.
+    // start or end of the selected part. Dragging the playhead's grip, or
+    // pressing anywhere else on the track, moves the playhead and seeks the
+    // player; on another part's block that also selects the part.
     function onPointerDown(event: PointerEvent): void {
         const bar = track.current;
         if (!bar || !duration.current || event.button !== 0) return;
@@ -52,6 +57,7 @@ export function Timeline({ parts, controls, player }: Props) {
             event.target === startHandle.current ? "start" : event.target === endHandle.current ? "end" : "playhead";
         const block = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-part]") : null;
         if (dragging === "playhead" && block) controls.select(Number(block.dataset.part));
+        scrubbing.current = dragging === "playhead";
         bar.setPointerCapture(event.pointerId);
 
         const timeAt = (clientX: number) => {
@@ -71,6 +77,7 @@ export function Timeline({ parts, controls, player }: Props) {
             bar.removeEventListener("pointermove", onMove);
             bar.removeEventListener("pointerup", onUp);
             bar.removeEventListener("pointercancel", onUp);
+            scrubbing.current = false;
             // Seek once at the end of the drag; seeking on every move would
             // flood Jellyfin with segment requests.
             if (dragging === "start") player.seekToStart();
@@ -98,7 +105,9 @@ export function Timeline({ parts, controls, player }: Props) {
                 ))}
                 <div class="tl-handle" ref={startHandle} title="Drag to set the start" style={{ left: at(selected.start) }} />
                 <div class="tl-handle" ref={endHandle} title="Drag to set the end" style={{ left: at(selected.end) }} />
-                <div class="tl-playhead" ref={playhead} />
+                <div class="tl-playhead" ref={playhead}>
+                    <div class="tl-grip" title="Drag to move the playhead" />
+                </div>
             </div>
             <div class="tl-labels">
                 <span class="mono">{fmtTime(0, false)}</span>
