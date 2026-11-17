@@ -8,12 +8,13 @@ import { useMe } from "../../lib/me";
 import { toast } from "../../lib/toast";
 import type { ItemDetails, Job, Source } from "../../types";
 import { CropGuide } from "./CropGuide";
-import { clipRequest, initialOptions, optionsReducer, type ClipOptions } from "./options";
+import { clipRequest, optionsReducer, type ClipOptions } from "./options";
 import { OptionsPanel } from "./OptionsPanel";
 import { partsProblem, selectedPart, selectedTiming } from "./parts";
 import { PartsList } from "./PartsList";
 import { usePreview } from "./preview";
 import { RangeControls } from "./RangeControls";
+import type { EditorStart } from "./reclip";
 import { ShortcutHelp } from "./ShortcutHelp";
 import { Timeline } from "./Timeline";
 import { useParts } from "./useParts";
@@ -23,21 +24,27 @@ interface Props {
     item: ItemDetails;
     // The versions of the video that can be clipped; at least one.
     sources: Source[];
+    // The options and parts to begin with: the defaults, or those of the
+    // clip being re-clipped.
+    start: EditorStart;
+    // When re-clipping: the name of that clip, for the note above the options.
+    reclipOf?: string;
 }
 
 // The clip editor: preview player, timeline, time controls and the list of
 // parts on one side, the options and the clips made from this video on the
 // other.
-export function Editor({ item, sources }: Props) {
+export function Editor({ item, sources, start, reclipOf }: Props) {
     const me = useMe();
-    const firstSource = sources[0]!;
-    const [options, dispatch] = useReducer(optionsReducer, null, () => initialOptions(firstSource, me.subtitle_styles));
+    const [options, dispatch] = useReducer(optionsReducer, start.options);
     const source = sources[options.sourceIndex]!;
-    const [parts, partsRef, partsControls] = useParts(firstSource.duration || item.runtime || 0);
+    const [parts, partsRef, partsControls] = useParts(start.parts);
     const { player, videoRef, error: previewError } = usePreview({
         itemId: item.id,
-        source: firstSource,
+        source,
         audioIndex: options.audioIndex,
+        // A re-clip opens where the clip begins.
+        startAt: reclipOf === undefined ? 0 : (start.parts.list[0]?.start ?? 0),
         timing: () => selectedTiming(partsRef.current),
         onDuration: partsControls.foundDuration,
     });
@@ -117,6 +124,12 @@ export function Editor({ item, sources }: Props) {
                 {me.can_clip ? null : (
                     <Notice error>
                         Your Jellyfin account is not allowed to download media, so you cannot create clips.
+                    </Notice>
+                )}
+                {reclipOf === undefined ? null : (
+                    <Notice>
+                        {`These are the settings of your clip "${reclipOf}". Change what you like and create a new clip; the original is kept. `}
+                        {start.caveats.join(" ")}
                     </Notice>
                 )}
                 <OptionsPanel

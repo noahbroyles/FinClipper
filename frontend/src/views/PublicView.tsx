@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useState } from "preact/hooks";
+import { ClipPlayer } from "../components/ClipPlayer";
 import { LoadStatus, Notice, PageHead } from "../components/ui";
 import { useLoad } from "../hooks/useLoad";
 import { api, BASE } from "../lib/api";
@@ -93,11 +94,7 @@ function PublicClipRow({ clip, canDownload, canUnshare, onUnshare }: RowProps) {
             ) : null}
             <div class="job-meta">{`Shared by ${sharer} · ${length} · ${fmtBytes(clip.size)}`}</div>
             <div class="job-meta">{clip.description}</div>
-            {watching ? (
-                <div class="public-player">
-                    <ClipPlayer src={`${downloadUrl}?inline=1`} />
-                </div>
-            ) : null}
+            {watching ? <ClipPlayer src={`${downloadUrl}?inline=1`} /> : null}
             {canDownload || canUnshare ? (
                 <div class="job-actions">
                     {/* Only MP4 clips can be watched; browsers rarely play MKV. */}
@@ -120,23 +117,4 @@ function PublicClipRow({ clip, canDownload, canUnshare, onUnshare }: RowProps) {
             ) : null}
         </div>
     );
-}
-
-// Inline player for a shared clip.
-function ClipPlayer({ src }: { src: string }) {
-    const ref = useRef<HTMLVideoElement>(null);
-
-    // A video element keeps playing (and downloading) after it is removed
-    // from the page, so stop it when the player is closed or the page left.
-    useEffect(() => {
-        const video = ref.current;
-        return () => {
-            if (!video) return;
-            video.pause();
-            video.removeAttribute("src");
-            video.load();
-        };
-    }, []);
-
-    return <video ref={ref} controls autoplay playsInline src={src} />;
 }

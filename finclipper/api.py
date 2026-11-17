@@ -637,6 +637,20 @@ def create_clip():
         start=min(start for start, _ in ranges),
         end=max(end for _, end in ranges),
         parts=ranges,
+        # What "Re-clip" opens the editor with. Stream indexes are the ones
+        # Jellyfin gives (the ones the editor's lists use), and the clip's
+        # name is left out because it can be changed later.
+        settings={
+            "source_id": source_id,
+            "mode": mode,
+            "audio_index": audio_index if audio is not None else -1,
+            "subtitle_index": subtitle_index,
+            "subtitle_style": subtitle_style,
+            "layout": layout,
+            "fit": fit,
+            "max_height": max_height,
+            "parts": parts,
+        },
         mode=mode,
         description=description,
         filename=media.clip_filename(title, *ranges[0], plan["extension"], name, more_parts=len(ranges) - 1),
@@ -744,7 +758,8 @@ def download_clip(job_id):
         return bad_request("Clip not found", 404)
     if job.status != DONE:
         return bad_request("This clip is not ready", 409)
-    return send_clip(job)
+    # inline=1 is used by the player on the "My clips" page.
+    return send_clip(job, inline=request.args.get("inline") == "1")
 
 
 # ----- public clips ----------------------------------------------------------

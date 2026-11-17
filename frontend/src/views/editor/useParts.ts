@@ -1,7 +1,6 @@
 import type { RefObject } from "preact";
 import { useMemo, useRef, useState } from "preact/hooks";
 import {
-    initialParts,
     withFoundDuration,
     withPartAdded,
     withPartMoved,
@@ -38,8 +37,8 @@ export interface PartsControls {
 //
 // Every call of a control makes a new state object, even when nothing
 // changed. The time inputs rely on that to know an edit has been applied.
-export function useParts(duration: number): [parts: ClipParts, ref: RefObject<ClipParts>, controls: PartsControls] {
-    const [parts, setParts] = useState(() => initialParts(duration));
+export function useParts(initial: ClipParts): [parts: ClipParts, ref: RefObject<ClipParts>, controls: PartsControls] {
+    const [parts, setParts] = useState(initial);
     const ref = useRef(parts);
 
     const controls = useMemo<PartsControls>(() => {

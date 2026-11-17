@@ -17,6 +17,8 @@ The server is written in Python with Flask and the web UI in TypeScript with Pre
 - Vertical 9:16 clips for phones (precise mode), at 1080×1920, 720×1280 or 540×960. The picture can be cropped at the sides (with sliders and a guide on the preview to choose how wide the kept part is and where it sits; the narrowest cut fills the screen, wider cuts keep more of the picture with black bars above and below), shown whole over a blurred copy of itself, or shown whole with black bars.
 - Multi-part clips (precise mode): splice up to 20 sections of a video into one clip, in any order. "Add part" adds a section at the playhead, the list under the time controls selects, reorders and removes parts, and "Play all parts" previews them in order. In a vertical crop, each part has its own crop position and width, so the frame can follow a subject from part to part.
 - Optional clip names, used in the clip list and as the download file name. Clips can be renamed later.
+- Watch your finished clips in the browser, under "My clips" and in the editor's clip list.
+- "Re-clip" opens the editor with the settings a clip was made with (version, audio track, subtitles, shape, crop, every part and the name), to make a changed copy. The original clip is kept.
 - Share finished clips with "Make public". They appear under "Public clips" for other signed in users, who can watch them in the browser or download them. A public clip is only listed for users whose Jellyfin account can see the video it was cut from, and watching or downloading needs the same Jellyfin download permission as making clips. The owner can make a clip private again, and administrators can take down anyone's public clip.
 - Background jobs with live progress, cancel and delete. Finished clips are deleted automatically after a configurable time.
 - The browser never talks to Jellyfin directly, so Jellyfin does not need to be reachable from where you use FinClipper.
@@ -125,7 +127,7 @@ FinClipper works behind a reverse proxy such as nginx, Caddy or Traefik:
 | `I` / `O` | Set start / end at the playhead |
 | `[` / `]` | Jump to start / end |
 | `P` | Play the selection and stop at the end |
-| `Space` | Play / pause |
+| `K` | Play / pause |
 | `←` / `→` | Back / forward 5 seconds (1 second with `Shift`) |
 | `,` / `.` | Back / forward 0.1 seconds |
 

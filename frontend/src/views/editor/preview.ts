@@ -39,6 +39,8 @@ export class PreviewPlayer {
     // fragment.
     private offset = 0;
     private offsetMeasured = false;
+    // A source time to jump to once the offset has been measured.
+    private seekWhenMeasured: number | null = null;
     // While playing the selected part or all parts: where the range being
     // played ends. There the player moves on to the next range, or pauses.
     private stopAt: number | null = null;
@@ -119,20 +121,36 @@ export class PreviewPlayer {
         this.callbacks.onError("");
 
         if (Hls.isSupported()) {
-            const hls = new Hls({ startPosition: resumeAt > 0 ? resumeAt + this.offset : -1, maxBufferLength: 30 });
+            // The offset can only be measured from the first segment. When
+            // asked to start somewhere else before it is known (a re-clip
+            // opens at the start of its clip), load the first segment
+            // anyway and jump from there; a seek with the wrong offset
+            // would leave every time in the editor a couple of frames out.
+            let startPosition = resumeAt > 0 ? resumeAt + this.offset : -1;
+            if (resumeAt > 0 && !this.offsetMeasured) {
+                this.seekWhenMeasured = resumeAt;
+                startPosition = -1;
+            }
+            const hls = new Hls({ startPosition, maxBufferLength: 30 });
             this.hls = hls;
             hls.on(Hls.Events.FRAG_BUFFERED, (_event, data) => {
                 // The first segment starts at source time 0, so the start
                 // PTS of its video is exactly the offset. Later reloads (audio
                 // track changes) keep the value measured here.
                 const frag = data.frag;
-                if (this.offsetMeasured || frag.type !== "main" || frag.sn !== 0) return;
+                if (frag.type !== "main" || frag.sn !== 0) return;
                 const videoInfo = frag.elementaryStreams.video;
-                if (!videoInfo || !Number.isFinite(videoInfo.startPTS)) return;
-                this.offsetMeasured = true;
-                const offset = videoInfo.startPTS - frag.start;
-                // Anything over half a second is not a decoder delay; ignore it.
-                if (offset > 0 && offset < 0.5) this.offset = offset;
+                if (!this.offsetMeasured && videoInfo && Number.isFinite(videoInfo.startPTS)) {
+                    this.offsetMeasured = true;
+                    const offset = videoInfo.startPTS - frag.start;
+                    // Anything over half a second is not a decoder delay; ignore it.
+                    if (offset > 0 && offset < 0.5) this.offset = offset;
+                }
+                if (this.seekWhenMeasured !== null) {
+                    const time = this.seekWhenMeasured;
+                    this.seekWhenMeasured = null;
+                    this.seek(time);
+                }
             });
             hls.on(Hls.Events.ERROR, (_event, data) => {
                 if (!data.fatal) return;
@@ -160,6 +178,7 @@ export class PreviewPlayer {
 
     // Stop the player and tell Jellyfin to stop transcoding for it.
     stop(): void {
+        this.seekWhenMeasured = null;
         if (this.hls) {
             this.hls.destroy();
             this.hls = null;
@@ -270,9 +289,10 @@ export interface Preview {
 
 interface PreviewSetup {
     itemId: string;
-    // What to play when the editor opens.
+    // What to play when the editor opens, and from where (a source time).
     source: Source;
     audioIndex: number;
+    startAt: number;
     // Start and end of the selected part and the video's length, as they
     // are at the moment of the call.
     timing(): Timing;
@@ -284,7 +304,7 @@ interface PreviewSetup {
 // given version as soon as the <video> element exists; call player.start()
 // to switch to another version or audio track. Leaving the editor stops
 // the preview.
-export function usePreview({ itemId, source, audioIndex, timing, onDuration }: PreviewSetup): Preview {
+export function usePreview({ itemId, source, audioIndex, startAt, timing, onDuration }: PreviewSetup): Preview {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [error, setError] = useState("");
     const latestOnDuration = useLatest(onDuration);
@@ -301,7 +321,7 @@ export function usePreview({ itemId, source, audioIndex, timing, onDuration }: P
     useEffect(() => {
         if (!videoRef.current) return;
         const detach = player.attach(videoRef.current);
-        player.start(source, audioIndex);
+        player.start(source, audioIndex, startAt);
         return detach;
     }, []);
     useAnimationFrame(() => player.tick());

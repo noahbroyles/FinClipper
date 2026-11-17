@@ -19,7 +19,7 @@ import threading
 COLUMNS = (
     "id", "user_id", "owner_name", "item_id", "title", "name", "start_time", "end_time", "mode",
     "description", "filename", "extension", "status", "error", "size", "created", "finished",
-    "public", "shared_at", "unshared_at", "parts",
+    "public", "shared_at", "unshared_at", "parts", "settings",
 )
 
 # Each entry upgrades the schema by one version, tracked in PRAGMA
@@ -33,6 +33,10 @@ COLUMNS = (
 # multi-part clips existed, which are the single range start_time to
 # end_time. For a multi-part clip those two columns hold the stretch of the
 # video its parts are taken from: the earliest start and the latest end.
+# settings is the choices a clip was made with (version, audio track,
+# subtitles, shape, crop of each part...) as a JSON object, so the editor
+# can be opened with them again ("Re-clip"). It is '' for clips made before
+# those were kept.
 MIGRATIONS = [
     """
     CREATE TABLE clips (
@@ -62,6 +66,9 @@ MIGRATIONS = [
     """,
     """
     ALTER TABLE clips ADD COLUMN parts TEXT NOT NULL DEFAULT '';
+    """,
+    """
+    ALTER TABLE clips ADD COLUMN settings TEXT NOT NULL DEFAULT '';
     """,
 ]
 

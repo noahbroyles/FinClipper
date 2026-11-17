@@ -32,8 +32,10 @@ export function useShortcuts(player: PreviewPlayer, timing: PartsControls): void
                 case "P":
                     player.playSelection();
                     break;
-                case " ":
-                    if (onVideo || target.closest("button, a")) return;
+                // Not Space: the browser already uses it to press whatever
+                // button has focus and to scroll the page.
+                case "k":
+                case "K":
                     player.togglePlay();
                     break;
                 case "ArrowLeft":

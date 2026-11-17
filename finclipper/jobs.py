@@ -92,6 +92,10 @@ class Job:
     # from (the earliest start and the latest end). Left empty, it becomes
     # the single range start to end.
     parts: list = field(default_factory=list)
+    # The choices the clip was made with, as the "create clip" request
+    # gave them once checked (see api.create_clip), for "Re-clip". Empty
+    # for clips made before these were kept.
+    settings: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.parts:
@@ -129,6 +133,7 @@ class Job:
             "shared_at": self.shared_at,
             "unshared_at": self.unshared_at,
             "parts": json.dumps([list(part) for part in self.parts]),
+            "settings": json.dumps(self.settings) if self.settings else "",
         }
 
     @classmethod
@@ -157,6 +162,7 @@ class Job:
             unshared_at=row["unshared_at"],
             # '' for clips stored before multi-part clips existed.
             parts=[tuple(part) for part in json.loads(row["parts"] or "[]")],
+            settings=json.loads(row["settings"] or "{}"),
             # Only finished jobs are read back from the database.
             progress=1.0 if row["status"] == DONE else 0.0,
         )
@@ -201,6 +207,10 @@ class Job:
             "mode": self.mode,
             "description": self.description,
             "filename": self.filename,
+            # Browsers can play MP4 but usually not MKV.
+            "playable": self.extension == "mp4",
+            # null for clips made before the settings were kept.
+            "settings": self.settings or None,
             "status": self.status,
             "public": self.public,
             "phase": self.phase,

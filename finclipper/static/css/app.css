@@ -125,6 +125,12 @@ input.invalid {
     text-decoration: none;
 }
 
+/* Links that look like buttons (Download, Re-clip) are coloured like the
+   buttons beside them, not like links. */
+a.btn {
+    color: var(--text);
+}
+
 .btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -865,11 +871,11 @@ input[type="range"] {
 }
 
 /* Inline player for a public clip. */
-.public-player {
+.clip-player {
     margin-top: 10px;
 }
 
-.public-player video {
+.clip-player video {
     display: block;
     width: 100%;
     max-height: 70vh;

@@ -73,6 +73,21 @@ export interface ClipRange {
     end: number;
 }
 
+// The choices a clip was made with, kept so the editor can be opened with
+// them again ("Re-clip"). Stream indexes are the ones in Source.
+export interface ClipSettings {
+    source_id: string;
+    mode: ClipMode;
+    // -1: no audio.
+    audio_index: number;
+    subtitle_index: number | null;
+    subtitle_style: string;
+    layout: ClipLayout;
+    fit: ClipFit;
+    max_height: number;
+    parts: Array<ClipRange & { crop_x: number; crop_width: number }>;
+}
+
 export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
 // One of the signed in user's own clips.
@@ -92,6 +107,10 @@ export interface Job {
     mode: ClipMode;
     description: string;
     filename: string;
+    // Whether a browser can play the finished clip (MP4, not MKV).
+    playable: boolean;
+    // null for clips made before the settings were kept.
+    settings: ClipSettings | null;
     status: JobStatus;
     public: boolean;
     phase: string | null;

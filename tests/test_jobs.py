@@ -82,6 +82,8 @@ class StoreTests(StoreTestCase):
         # An old clip is the single range it always was.
         self.assertEqual((job.parts, job.duration), ([(10, 25)], 15))
         self.assertEqual(job.to_dict()["parts"], [{"start": 10, "end": 25}])
+        # Its settings were never kept.
+        self.assertIsNone(job.to_dict()["settings"])
 
     def test_parts_round_trip(self):
         job = make_job(start=50, end=20, parts=[(50, 62.5), (10, 20)])
@@ -93,6 +95,23 @@ class StoreTests(StoreTestCase):
         self.assertEqual(loaded.to_dict()["parts"], [{"start": 50, "end": 62.5}, {"start": 10, "end": 20}])
         self.assertEqual(loaded.to_dict()["duration"], 22.5)
         self.assertEqual(loaded.to_public_dict("u2")["duration"], 22.5)
+
+    def test_settings_round_trip(self):
+        settings = {
+            "source_id": "s1", "mode": "precise", "audio_index": 2, "subtitle_index": None, "subtitle_style": "boxed",
+            "layout": "vertical", "fit": "crop", "max_height": 1280,
+            "parts": [{"start": 50, "end": 62.5, "crop_x": 0.25, "crop_width": 0.6}],
+        }
+        job = self.add(make_job(start=50, end=62.5, settings=settings))
+        loaded = Job.from_record(self.manager.store.get(job.id))
+        self.assertEqual(loaded.settings, settings)
+        self.assertEqual(loaded.to_dict()["settings"], settings)
+        # Only the owner gets them: they are for making the clip again.
+        self.assertNotIn("settings", loaded.to_public_dict("u2"))
+
+    def test_owner_view_says_whether_the_browser_can_play_the_clip(self):
+        self.assertTrue(make_job().to_dict()["playable"])
+        self.assertFalse(make_job(extension="mkv", filename="Film.mkv").to_dict()["playable"])
 
     def test_plain_clip_is_one_part(self):
         job = make_job(start=3, end=8)
