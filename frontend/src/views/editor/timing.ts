@@ -1,5 +1,6 @@
-// The clip's start and end on the video's timeline. Pure functions, so
-// they can be unit tested with "bun test".
+// One time range on the video's timeline: the start and end of a clip, or
+// of one part of a multi-part clip (see parts.ts). Pure functions, so they
+// can be unit tested with "bun test".
 import { clamp } from "../../lib/format";
 
 // All times are in seconds of the source video.
@@ -16,11 +17,6 @@ const MIN_CLIP_SECONDS = 0.5;
 // Times are kept to the millisecond, the precision the server accepts.
 function round(time: number): number {
     return Math.round(time * 1000) / 1000;
-}
-
-// A new video starts with its first 30 seconds selected.
-export function initialTiming(duration: number): Timing {
-    return { start: 0, end: Math.min(duration, 30), duration };
 }
 
 // Move the start. Moving it past the end pushes the end along, keeping the
@@ -52,7 +48,7 @@ export function withDuration(timing: Timing, duration: number | null): Timing {
     return withEnd({ ...timing, duration: duration || timing.duration }, timing.end);
 }
 
-// Why a clip with this timing cannot be made, or "" if it can.
+// Why a clip (or a part) with this timing cannot be made, or "" if it can.
 export function timingProblem(timing: Timing, maxClipSeconds: number): "" | "long" | "short" {
     const length = timing.end - timing.start;
     if (maxClipSeconds > 0 && length > maxClipSeconds + 0.001) return "long";

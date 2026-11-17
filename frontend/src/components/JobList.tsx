@@ -6,7 +6,7 @@ import { isActive, type ClipJobs } from "../hooks/useClipJobs";
 import { api, BASE } from "../lib/api";
 import { errorMessage, fmtBytes, fmtRuntime, fmtTime } from "../lib/format";
 import { toast } from "../lib/toast";
-import type { Job } from "../types";
+import type { ClipRange, Job } from "../types";
 
 export function jobStatusText(job: Job): string {
     switch (job.status) {
@@ -118,9 +118,7 @@ function JobRow({ job, showItemLink, renaming, onRenameStart, onRenameCancel, on
                     {itemTitle}
                 </div>
             ) : null}
-            <div class="job-meta mono">
-                {`${fmtTime(job.start)} → ${fmtTime(job.end)}  (${fmtRuntime(job.duration) || "0s"})`}
-            </div>
+            <ClipRanges parts={job.parts} duration={job.duration} />
             <div class="job-meta">{job.description}</div>
             <div class={`job-status ${job.status}`}>
                 {jobStatusText(job)}
@@ -163,6 +161,25 @@ function JobRow({ job, showItemLink, renaming, onRenameStart, onRenameCancel, on
                     </button>
                 )}
             </div>
+        </div>
+    );
+}
+
+// The time range of a clip and its length, or for a multi-part clip the
+// number of parts, the total length, and then each part's range.
+export function ClipRanges({ parts, duration }: { parts: ClipRange[]; duration: number }) {
+    const length = fmtRuntime(duration) || "0s";
+    const range = (part: ClipRange) => `${fmtTime(part.start)} → ${fmtTime(part.end)}`;
+    const only = parts.length === 1 ? parts[0] : undefined;
+    if (only) return <div class="job-meta mono">{`${range(only)}  (${length})`}</div>;
+    return (
+        <div class="job-meta mono">
+            {`${parts.length} parts  (${length})`}
+            <ol class="job-parts">
+                {parts.map((part, index) => (
+                    <li key={index}>{range(part)}</li>
+                ))}
+            </ol>
         </div>
     );
 }

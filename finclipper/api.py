@@ -140,12 +140,13 @@ def rewrite_playlist(text):
     return "\n".join(lines) + "\n"
 
 
-def subtitle_fetcher(client, item_id, source_id, index, path, start, end, style, layout):
+def subtitle_fetcher(client, item_id, source_id, index, path, ranges, style, layout):
     """Return a function that writes the ASS subtitle file for one clip.
 
     The function downloads the whole text subtitle track from Jellyfin as
     SRT (Jellyfin converts any text format, and also serves external
-    subtitle files) and keeps the part inside the clip. It runs in the job
+    subtitle files) and keeps what falls inside the clip; ranges lists the
+    (start, end) of each of its parts. It runs in the job
     worker rather than in the request, because the first time a track is
     used Jellyfin has to extract it from the video file, which can take a
     while for a long movie. Errors are raised with a message for the user.
@@ -169,7 +170,7 @@ def subtitle_fetcher(client, item_id, source_id, index, path, start, end, style,
             response.close()
         # Jellyfin serves converted subtitles as UTF-8.
         text = body.decode("utf-8", errors="replace")
-        path.write_text(media.build_ass(text, start, end, style, layout), encoding="utf-8")
+        path.write_text(media.build_ass_parts(text, ranges, style, layout), encoding="utf-8")
 
     return fetch
 
@@ -220,6 +221,7 @@ def me():
         is_admin=session.get("is_admin", False),
         can_clip=can_clip(),
         max_clip_seconds=config["MAX_CLIP_SECONDS"],
+        max_clip_parts=media.MAX_CLIP_PARTS,
         # How long finished clips are kept, and public ones (0: until they
         # are made private).
         clip_retention_hours=config["CLIP_RETENTION_HOURS"],
@@ -459,27 +461,21 @@ def create_clip():
         return bad_request("Invalid item id")
     if mode not in ("fast", "precise"):
         return bad_request("Mode must be fast or precise")
+    # The time ranges to splice together, each with the position and width
+    # of its vertical crop. A plain clip is one part.
     try:
-        start = media.parse_timestamp(data.get("start"))
-        end = media.parse_timestamp(data.get("end"))
+        parts = media.parse_clip_parts(data)
     except ValueError as exc:
         return bad_request(str(exc))
+    multipart = len(parts) > 1
     # Shape: "horizontal" keeps the source's shape, "vertical" makes a 9:16
-    # phone screen clip framed as "fit" says (crop_x places a crop and
-    # crop_width says how wide it is, see media.VERTICAL_FITS).
+    # phone screen clip framed as "fit" says (see media.VERTICAL_FITS).
     layout = data.get("layout") or "horizontal"
     if layout not in ("horizontal", "vertical"):
         return bad_request("Layout must be horizontal or vertical")
     fit = data.get("fit") or "crop"
     if fit not in media.VERTICAL_FITS:
         return bad_request("Invalid vertical framing")
-    crop_x = data.get("crop_x", 0.5)
-    # NaN and infinity (which Python's JSON parser accepts) fail the range check.
-    if isinstance(crop_x, bool) or not isinstance(crop_x, (int, float)) or not 0 <= crop_x <= 1:
-        return bad_request("Invalid crop position")
-    crop_width = data.get("crop_width", 0)
-    if isinstance(crop_width, bool) or not isinstance(crop_width, (int, float)) or not 0 <= crop_width <= 1:
-        return bad_request("Invalid crop width")
     # subtitle_index: null or missing means no burned-in subtitles.
     subtitle_index = data.get("subtitle_index")
     if subtitle_index is not None and (isinstance(subtitle_index, bool) or not isinstance(subtitle_index, int)):
@@ -487,8 +483,8 @@ def create_clip():
     subtitle_style = data.get("subtitle_style") or "classic"
     if subtitle_style not in media.SUBTITLE_STYLES:
         return bad_request("Unknown subtitle style")
-    if mode == "fast" and (layout == "vertical" or subtitle_index is not None):
-        return bad_request("Vertical clips and burned-in subtitles need Precise mode")
+    if mode == "fast" and (layout == "vertical" or subtitle_index is not None or multipart):
+        return bad_request("Vertical clips, burned-in subtitles and multi-part clips need Precise mode")
     try:
         max_height = int(data.get("max_height") or 0)
     except (TypeError, ValueError):
@@ -538,16 +534,22 @@ def create_clip():
         if subtitle_stream is None:
             return bad_request("Unknown subtitle track")
 
-    # Validate the range against the real runtime.
+    # Validate the ranges against the real runtime.
     runtime = media.ticks_to_seconds(source.get("RunTimeTicks") or item.get("RunTimeTicks"))
-    if runtime:
-        if start >= runtime:
-            return bad_request("Start is past the end of the video")
-        # Players can report a slightly longer duration than Jellyfin does.
-        end = min(end, runtime)
-    duration = end - start
-    if duration < 0.5:
-        return bad_request("The clip must be at least half a second long")
+    for part in parts:
+        if runtime:
+            if part["start"] >= runtime:
+                return bad_request("A part starts past the end of the video" if multipart else "Start is past the end of the video")
+            # Players can report a slightly longer duration than Jellyfin does.
+            part["end"] = min(part["end"], runtime)
+        if part["end"] - part["start"] < 0.5:
+            return bad_request(
+                "Every part must be at least half a second long" if multipart
+                else "The clip must be at least half a second long"
+            )
+    ranges = [(part["start"], part["end"]) for part in parts]
+    # The limit applies to the finished clip: all parts together.
+    duration = sum(end - start for start, end in ranges)
     limit = config["MAX_CLIP_SECONDS"]
     if limit and duration > limit + 0.001:
         return bad_request(f"Clips can be at most {media.format_timestamp(limit, millis=False)} long")
@@ -580,17 +582,13 @@ def create_clip():
         subtitle = {"kind": "text", "file": subtitle_file}
         prepare = subtitle_fetcher(
             client, item_id, source_id, subtitle_index, config["CLIPS_DIR"] / subtitle_file,
-            start, end, subtitle_style, layout,
+            ranges, subtitle_style, layout,
         )
 
     plan = media.plan_output(mode, video, audio)
-    command = media.build_ffmpeg_command(
-        source=input_source,
-        start=start,
-        duration=duration,
+    options = dict(
         video=video,
         audio=audio,
-        mode=mode,
         max_height=max_height,
         output_path=config["CLIPS_DIR"] / f"{job_id}.part",
         plan=plan,
@@ -599,17 +597,22 @@ def create_clip():
         http_headers=http_headers,
         layout=layout,
         fit=fit,
-        crop_x=float(crop_x),
-        crop_width=float(crop_width),
         subtitle=subtitle,
     )
+    if multipart:
+        command = media.build_multipart_command(input_source, parts, **options)
+    else:
+        command = media.build_ffmpeg_command(
+            input_source, parts[0]["start"], duration, mode=mode,
+            crop_x=parts[0]["crop_x"], crop_width=parts[0]["crop_width"], **options,
+        )
     # Same command with the token hidden, for logs.
     redacted = ["Authorization: <redacted>" if arg == http_headers else arg for arg in command]
 
     description = plan["description"]
     if layout == "vertical":
         fit_names = {"crop": "cropped", "blur": "blurred background", "bars": "black bars"}
-        if fit == "crop" and crop_width > 0:
+        if fit == "crop" and any(part["crop_width"] > 0 for part in parts):
             # A crop wider than the frame does not fill it.
             fit_names["crop"] = "cropped, black bars"
         description += f", vertical {media.VERTICAL_SIZES[max_height]}x{max_height} ({fit_names[fit]})"
@@ -626,11 +629,13 @@ def create_clip():
         user_id=user_id(),
         item_id=item_id,
         title=title,
-        start=start,
-        end=end,
+        # The stretch of the video the clip is taken from.
+        start=min(start for start, _ in ranges),
+        end=max(end for _, end in ranges),
+        parts=ranges,
         mode=mode,
         description=description,
-        filename=media.clip_filename(title, start, end, plan["extension"], name),
+        filename=media.clip_filename(title, *ranges[0], plan["extension"], name, more_parts=len(ranges) - 1),
         extension=plan["extension"],
         command=command,
         redacted_command=redacted,

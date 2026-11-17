@@ -78,6 +78,8 @@ function PublicClipRow({ clip, canDownload, canUnshare, onUnshare }: RowProps) {
     const downloadUrl = `${BASE}api/public-clips/${clip.id}/download`;
     const itemTitle = <a href={`#/item/${clip.item_id}`}>{clip.title}</a>;
     const sharer = clip.mine ? "you" : clip.owner_name || "another user";
+    let length = fmtRuntime(clip.duration) || "0s";
+    if (clip.parts.length > 1) length = `${clip.parts.length} parts, ${length}`;
     return (
         <div class="job">
             {/* Same layout as "My clips": a named clip shows the video title below its name. */}
@@ -89,7 +91,7 @@ function PublicClipRow({ clip, canDownload, canUnshare, onUnshare }: RowProps) {
                     {itemTitle}
                 </div>
             ) : null}
-            <div class="job-meta">{`Shared by ${sharer} · ${fmtRuntime(clip.duration) || "0s"} · ${fmtBytes(clip.size)}`}</div>
+            <div class="job-meta">{`Shared by ${sharer} · ${length} · ${fmtBytes(clip.size)}`}</div>
             <div class="job-meta">{clip.description}</div>
             {watching ? (
                 <div class="public-player">

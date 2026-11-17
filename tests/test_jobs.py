@@ -10,7 +10,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from finclipper.store import ClipStore
+from finclipper.store import MIGRATIONS, ClipStore
 from finclipper.jobs import CANCELLED, DONE, FAILED, QUEUED, RUNNING, Job, JobLimitError, JobManager
 
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None
@@ -63,7 +63,40 @@ class StoreTestCase(unittest.TestCase):
 
 class StoreTests(StoreTestCase):
     def test_schema_version(self):
-        self.assertEqual(self.manager.store.schema_version(), 1)
+        self.assertEqual(self.manager.store.schema_version(), len(MIGRATIONS))
+
+    def test_database_from_before_multi_part_clips_is_upgraded(self):
+        path = self.tmp / "old.db"
+        db = sqlite3.connect(path)
+        db.executescript(MIGRATIONS[0] + "PRAGMA user_version = 1;")
+        db.execute(
+            "INSERT INTO clips (id, user_id, item_id, title, start_time, end_time, mode, description, filename,"
+            " extension, status, created) VALUES ('old', 'u1', 'i1', 'Film', 10, 25, 'fast', 'copy', 'Film.mp4', 'mp4', 'done', 1)"
+        )
+        db.commit()
+        db.close()
+        store = ClipStore(path)
+        self.stores.append(store)
+        self.assertEqual(store.schema_version(), len(MIGRATIONS))
+        job = Job.from_record(store.get("old"))
+        # An old clip is the single range it always was.
+        self.assertEqual((job.parts, job.duration), ([(10, 25)], 15))
+        self.assertEqual(job.to_dict()["parts"], [{"start": 10, "end": 25}])
+
+    def test_parts_round_trip(self):
+        job = make_job(start=50, end=20, parts=[(50, 62.5), (10, 20)])
+        self.add(job)
+        loaded = Job.from_record(self.manager.store.get(job.id))
+        self.assertEqual(loaded.parts, [(50, 62.5), (10, 20)])
+        # The length of the finished clip, not the span from start to end.
+        self.assertEqual(loaded.duration, 22.5)
+        self.assertEqual(loaded.to_dict()["parts"], [{"start": 50, "end": 62.5}, {"start": 10, "end": 20}])
+        self.assertEqual(loaded.to_dict()["duration"], 22.5)
+        self.assertEqual(loaded.to_public_dict("u2")["duration"], 22.5)
+
+    def test_plain_clip_is_one_part(self):
+        job = make_job(start=3, end=8)
+        self.assertEqual((job.parts, job.duration), ([(3, 8)], 5))
 
     def test_newer_database_is_refused(self):
         db = sqlite3.connect(self.tmp / "newer.db")

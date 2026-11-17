@@ -467,6 +467,34 @@ main {
     border-bottom: 2px solid var(--accent);
 }
 
+/* Parts of a multi-part clip other than the one being edited. Clicking one
+   selects it. */
+.tl-range.other {
+    background: rgba(139, 92, 246, 0.08);
+    border-color: rgba(139, 92, 246, 0.45);
+}
+
+.tl-range:not(.other) {
+    z-index: 1;
+}
+
+/* The number of a part, matching the list under the time controls. */
+.tl-number {
+    position: absolute;
+    top: 2px;
+    left: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--text-dim);
+    pointer-events: none;
+}
+
+.tl-range:not(.other) .tl-number {
+    left: 10px;
+    color: var(--text);
+}
+
 .tl-handle {
     position: absolute;
     top: -4px;
@@ -551,6 +579,80 @@ main {
 
 .range-summary .duration.over {
     color: var(--danger);
+}
+
+/* Which part of a multi-part clip the start and end rows are editing. */
+.range-part {
+    font-size: 13px;
+}
+
+/* The parts a clip is spliced from, in playing order. */
+.parts {
+    margin-top: 14px;
+}
+
+.parts-list {
+    list-style: none;
+    margin: 0 0 10px;
+    padding: 0;
+    display: grid;
+    gap: 6px;
+}
+
+.part {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px 4px 4px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.part.selected {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.part-select {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    padding: 4px 6px;
+    background: none;
+    border: 0;
+    border-radius: 6px;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.part-number {
+    width: 22px;
+    height: 22px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--bg-input);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.part.selected .part-number {
+    background: var(--accent);
+    color: #fff;
+}
+
+.parts-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
 }
 
 .shortcuts {
@@ -711,6 +813,12 @@ input[type="range"] {
 .job-meta {
     font-size: 13px;
     color: var(--text-dim);
+}
+
+/* The ranges of a multi-part clip, numbered in playing order. */
+.job-parts {
+    margin: 2px 0 0;
+    padding-left: 2.2em;
 }
 
 /* Small label next to a clip's status, such as "Public". */

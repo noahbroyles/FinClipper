@@ -1,7 +1,9 @@
 // The choices in the editor's Options panel and what follows from them.
+// They apply to the whole clip; what differs per part is in parts.ts.
 // Pure functions, so they can be unit tested with "bun test".
-import { DEFAULT_CROP_WIDTH, HORIZONTAL_HEIGHTS, MP4_AUDIO_COPY, MP4_VIDEO_COPY, VERTICAL_SIZES } from "../../constants";
+import { HORIZONTAL_HEIGHTS, MP4_AUDIO_COPY, MP4_VIDEO_COPY, VERTICAL_SIZES } from "../../constants";
 import type { ClipFit, ClipLayout, ClipMode, Source, SubtitleStyle, SubtitleTrack } from "../../types";
+import type { Part } from "./parts";
 
 export interface ClipOptions {
     // Which version of the video, as an index into the usable sources.
@@ -15,11 +17,9 @@ export interface ClipOptions {
     layout: ClipLayout;
     // How the picture fills a vertical frame.
     fit: ClipFit;
-    // Where a crop sits: 0 is the left edge, 1 the right edge.
-    cropX: number;
-    // How wide a crop is: 0 is the narrowest cut, which fills the screen,
-    // and 1 the whole width. Wider cuts get black bars above and below.
-    cropWidth: number;
+    // Whether the clip is spliced from more than one part. Kept here, in
+    // step with the parts by the editor, because it decides the mode.
+    multiPart: boolean;
     mode: ClipMode;
     // Precise mode only. Horizontal: the largest height, 0 for the
     // original. Vertical: the output height (see VERTICAL_SIZES).
@@ -46,8 +46,7 @@ export function initialOptions(source: Source, styles: SubtitleStyle[]): ClipOpt
         subtitleStyle: styles[0]?.id ?? "",
         layout: "horizontal",
         fit: "crop",
-        cropX: 0.5,
-        cropWidth: DEFAULT_CROP_WIDTH,
+        multiPart: false,
         mode: "fast",
         maxHeight: 0,
         name: "",
@@ -55,9 +54,11 @@ export function initialOptions(source: Source, styles: SubtitleStyle[]): ClipOpt
 }
 
 // Fast mode copies the video untouched, so it can neither burn in
-// subtitles nor change the shape. Those choices need Precise mode.
+// subtitles nor change the shape, and it can only cut on keyframes, which
+// would show unwanted frames where parts are joined. Those choices need
+// Precise mode.
 export function needsPrecise(options: ClipOptions): boolean {
-    return options.layout === "vertical" || options.subtitleIndex !== null;
+    return options.layout === "vertical" || options.subtitleIndex !== null || options.multiPart;
 }
 
 export function optionsReducer(state: ClipOptions, action: OptionsAction): ClipOptions {
@@ -121,21 +122,23 @@ export function describeOutput(source: Source, options: ClipOptions): string {
     return `Output: original ${videoCodec || "video"}${audio} in an MKV file (this codec does not fit in MP4). It will start on a keyframe.`;
 }
 
-// The body of the "create clip" request for these choices.
-export function clipRequest(itemId: string, source: Source, options: ClipOptions, start: number, end: number) {
+// The body of the "create clip" request for these choices and parts.
+export function clipRequest(itemId: string, source: Source, options: ClipOptions, parts: Part[]) {
     return {
         item_id: itemId,
         source_id: source.id,
-        start,
-        end,
+        parts: parts.map((part) => ({
+            start: part.start,
+            end: part.end,
+            crop_x: part.cropX,
+            crop_width: part.cropWidth,
+        })),
         mode: options.mode,
         audio_index: options.audioIndex,
         max_height: options.mode === "precise" ? options.maxHeight : 0,
         name: options.name,
         layout: options.layout,
         fit: options.fit,
-        crop_x: options.cropX,
-        crop_width: options.cropWidth,
         subtitle_index: options.subtitleIndex,
         subtitle_style: options.subtitleStyle,
     };

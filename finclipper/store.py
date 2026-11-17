@@ -19,7 +19,7 @@ import threading
 COLUMNS = (
     "id", "user_id", "owner_name", "item_id", "title", "name", "start_time", "end_time", "mode",
     "description", "filename", "extension", "status", "error", "size", "created", "finished",
-    "public", "shared_at", "unshared_at",
+    "public", "shared_at", "unshared_at", "parts",
 )
 
 # Each entry upgrades the schema by one version, tracked in PRAGMA
@@ -28,6 +28,11 @@ COLUMNS = (
 #   finished     when the clip reached a final state (done, failed...)
 #   shared_at    when it was made public (0 while private)
 #   unshared_at  when it was last made private (0 if never shared)
+# parts is the time ranges a clip is spliced from, in the order they are
+# played, as JSON: [[start, end], ...]. It is '' for clips made before
+# multi-part clips existed, which are the single range start_time to
+# end_time. For a multi-part clip those two columns hold the stretch of the
+# video its parts are taken from: the earliest start and the latest end.
 MIGRATIONS = [
     """
     CREATE TABLE clips (
@@ -54,6 +59,9 @@ MIGRATIONS = [
     );
     CREATE INDEX clips_by_user ON clips (user_id, created);
     CREATE INDEX clips_public ON clips (public, shared_at);
+    """,
+    """
+    ALTER TABLE clips ADD COLUMN parts TEXT NOT NULL DEFAULT '';
     """,
 ]
 

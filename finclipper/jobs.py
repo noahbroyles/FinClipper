@@ -13,6 +13,7 @@ in-memory copy and the database never disagree about a job.
 """
 
 import os
+import json
 import time
 import uuid
 import queue
@@ -85,10 +86,24 @@ class Job:
     public: bool = False
     shared_at: float = 0.0
     unshared_at: float = 0.0
+    # The time ranges the clip is spliced from, as (start, end) pairs in
+    # the order they are played. A plain clip has one. For a multi-part
+    # clip, start and end are the stretch of the video the parts are taken
+    # from (the earliest start and the latest end). Left empty, it becomes
+    # the single range start to end.
+    parts: list = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.parts:
+            self.parts = [(self.start, self.end)]
 
     @property
     def duration(self):
-        return self.end - self.start
+        """Length of the finished clip in seconds."""
+        return sum(end - start for start, end in self.parts)
+
+    def parts_dicts(self):
+        return [{"start": start, "end": end} for start, end in self.parts]
 
     def to_record(self):
         """The columns stored in the database for this job."""
@@ -113,6 +128,7 @@ class Job:
             "public": int(self.public),
             "shared_at": self.shared_at,
             "unshared_at": self.unshared_at,
+            "parts": json.dumps([list(part) for part in self.parts]),
         }
 
     @classmethod
@@ -139,6 +155,8 @@ class Job:
             public=bool(row["public"]),
             shared_at=row["shared_at"],
             unshared_at=row["unshared_at"],
+            # '' for clips stored before multi-part clips existed.
+            parts=[tuple(part) for part in json.loads(row["parts"] or "[]")],
             # Only finished jobs are read back from the database.
             progress=1.0 if row["status"] == DONE else 0.0,
         )
@@ -159,6 +177,7 @@ class Job:
             "mine": self.user_id == viewer_id,
             "start": self.start,
             "end": self.end,
+            "parts": self.parts_dicts(),
             "duration": self.duration,
             "description": self.description,
             "filename": self.filename,
@@ -177,6 +196,7 @@ class Job:
             "name": self.name,
             "start": self.start,
             "end": self.end,
+            "parts": self.parts_dicts(),
             "duration": self.duration,
             "mode": self.mode,
             "description": self.description,

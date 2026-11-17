@@ -49,8 +49,7 @@ describe("initialOptions", () => {
             subtitleIndex: null,
             subtitleStyle: "classic",
             layout: "horizontal",
-            cropX: 0.5,
-            cropWidth: 0.35,
+            multiPart: false,
             mode: "fast",
             maxHeight: 0,
         });
@@ -64,9 +63,11 @@ describe("initialOptions", () => {
 describe("optionsReducer", () => {
     const initial = initialOptions(source(), STYLES);
 
-    test("subtitles and vertical clips force Precise mode", () => {
+    test("subtitles, vertical clips and several parts force Precise mode", () => {
         expect(set(initial, { subtitleIndex: 3 }).mode).toBe("precise");
         expect(set(initial, { layout: "vertical" }).mode).toBe("precise");
+        expect(set(initial, { multiPart: true }).mode).toBe("precise");
+        expect(set(set(initial, { multiPart: true }), { mode: "fast" }).mode).toBe("precise");
         // Fast cannot be chosen while one of them is on.
         expect(set(set(initial, { layout: "vertical" }), { mode: "fast" }).mode).toBe("precise");
     });
@@ -171,27 +172,30 @@ describe("describeOutput", () => {
 describe("clipRequest", () => {
     const initial = initialOptions(source(), STYLES);
 
+    const one = [{ id: 1, start: 12.5, end: 20, cropX: 0.25, cropWidth: 0.6 }];
+
     test("fast mode never scales", () => {
         const options = set(set(initial, { mode: "precise" }), { maxHeight: 720 });
-        expect(clipRequest("item1", source(), options, 1, 2).max_height).toBe(720);
-        expect(clipRequest("item1", source(), set(options, { mode: "fast" }), 1, 2).max_height).toBe(0);
+        expect(clipRequest("item1", source(), options, one).max_height).toBe(720);
+        expect(clipRequest("item1", source(), set(options, { mode: "fast" }), one).max_height).toBe(0);
     });
 
-    test("sends every choice", () => {
-        const options = set(initial, { layout: "vertical", fit: "blur", cropX: 0.25, cropWidth: 0.6, subtitleIndex: 3, name: "Clip" });
-        expect(clipRequest("item1", source(), options, 12.5, 20)).toEqual({
+    test("sends every choice, and every part with its own crop, in playing order", () => {
+        const options = set(initial, { layout: "vertical", fit: "blur", subtitleIndex: 3, name: "Clip" });
+        const parts = [...one, { id: 2, start: 3, end: 8, cropX: 0.9, cropWidth: 0 }];
+        expect(clipRequest("item1", source(), options, parts)).toEqual({
             item_id: "item1",
             source_id: "src1",
-            start: 12.5,
-            end: 20,
+            parts: [
+                { start: 12.5, end: 20, crop_x: 0.25, crop_width: 0.6 },
+                { start: 3, end: 8, crop_x: 0.9, crop_width: 0 },
+            ],
             mode: "precise",
             audio_index: 1,
             max_height: 1920,
             name: "Clip",
             layout: "vertical",
             fit: "blur",
-            crop_x: 0.25,
-            crop_width: 0.6,
             subtitle_index: 3,
             subtitle_style: "classic",
         });

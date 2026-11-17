@@ -15,6 +15,7 @@ The server is written in Python with Flask and the web UI in TypeScript with Pre
 - Choice of audio track (or no audio) and of version, for items with several versions.
 - Burn in subtitles (precise mode). Text subtitles (SRT, ASS, WebVTT, including external subtitle files) can use one of four styles: classic white with an outline, white on a dark box, yellow, or serif. Picture subtitles (Blu-ray PGS, DVD, DVB) inside the video file are burned in as they are.
 - Vertical 9:16 clips for phones (precise mode), at 1080×1920, 720×1280 or 540×960. The picture can be cropped at the sides (with sliders and a guide on the preview to choose how wide the kept part is and where it sits; the narrowest cut fills the screen, wider cuts keep more of the picture with black bars above and below), shown whole over a blurred copy of itself, or shown whole with black bars.
+- Multi-part clips (precise mode): splice up to 20 sections of a video into one clip, in any order. "Add part" adds a section at the playhead, the list under the time controls selects, reorders and removes parts, and "Play all parts" previews them in order. In a vertical crop, each part has its own crop position and width, so the frame can follow a subject from part to part.
 - Optional clip names, used in the clip list and as the download file name. Clips can be renamed later.
 - Share finished clips with "Make public". They appear under "Public clips" for other signed in users, who can watch them in the browser or download them. A public clip is only listed for users whose Jellyfin account can see the video it was cut from, and watching or downloading needs the same Jellyfin download permission as making clips. The owner can make a clip private again, and administrators can take down anyone's public clip.
 - Background jobs with live progress, cancel and delete. Finished clips are deleted automatically after a configurable time.
@@ -26,8 +27,9 @@ The server is written in Python with Flask and the web UI in TypeScript with Pre
 2. Library browsing and artwork go through FinClipper's JSON API, which forwards the requests to Jellyfin with your token.
 3. The preview player plays Jellyfin's own HLS stream, proxied through FinClipper. The proxy only forwards HLS playlist and segment requests, adds your token as a header, and strips any token from the playlists before they reach the browser. The preview timeline is corrected for the small video delay in Jellyfin's HLS segments, so the frame you see at a given time is exactly the frame the clip starts with.
 4. When you create a clip, FinClipper asks Jellyfin for the item again (so stream indexes and file paths never come from the browser), then runs ffmpeg in a background worker. ffmpeg reads the original file directly from disk if it can find it, or otherwise streams the original file from Jellyfin over HTTP.
-5. For burned-in text subtitles, the worker first downloads the subtitle track from Jellyfin as SRT (Jellyfin converts other text formats and caches extracted tracks), keeps the part inside the clip and writes it as an ASS file in the chosen style. Picture subtitles are read by ffmpeg straight from the video.
-6. The finished clip is offered as a download named after the clip's name if you gave it one, or otherwise with a readable name such as `Show - S01E02 - Title [00.12.03-00.12.45].mp4`.
+5. A multi-part clip is made in one ffmpeg run: the file is opened once per part, each seeking straight to its part, and the parts are joined before encoding, so the joins are frame accurate and the sound stays in step with the picture.
+6. For burned-in text subtitles, the worker first downloads the subtitle track from Jellyfin as SRT (Jellyfin converts other text formats and caches extracted tracks), keeps the part inside the clip and writes it as an ASS file in the chosen style. Picture subtitles are read by ffmpeg straight from the video.
+7. The finished clip is offered as a download named after the clip's name if you gave it one, or otherwise with a readable name such as `Show - S01E02 - Title [00.12.03-00.12.45].mp4`.
 
 ## Quick start
 
@@ -42,6 +44,10 @@ The server is written in Python with Flask and the web UI in TypeScript with Pre
    ```
 
 3. Open `http://your-server:8080` and sign in with a Jellyfin account.
+
+### Beta image
+
+Pushes to the `beta` branch publish `ghcr.io/<owner>/finclipper:beta`, for trying changes before they reach `latest`. A beta can upgrade the clip database (`finclipper.db`) to a newer layout, and an older FinClipper refuses to start on a database from a newer one. So give the beta its own `DATA_DIR` (for example a copy of `./data`), not the one your `latest` container uses.
 
 ## Networking
 
@@ -136,6 +142,7 @@ FinClipper works behind a reverse proxy such as nginx, Caddy or Traefik:
 - Clips are stored in a SQLite database in `DATA_DIR` and survive restarts, as do login sessions. The job queue and running ffmpeg processes are kept in memory, so the app must run as a single gunicorn worker (the included `gunicorn.conf.py` does this), and clips that were queued or being made when the container stopped are marked as failed and have to be created again.
 - DVD and Blu-ray folders and ISO images are not supported, only regular video files.
 - External audio files (separate `.mka`/`.ac3` next to the video) cannot be selected, only audio tracks inside the video file.
+- Multi-part clips are always re-encoded (precise mode), all parts come from the same video and version, and parts are joined with plain cuts (no fades). The preview pauses briefly when "Play all parts" jumps between parts; the finished clip does not. Where a part does not start exactly on a frame, the last frame before the join can be held for one extra frame.
 - Subtitles can only be burned in (precise mode), not added as a separate track. The preview player does not show them.
 - Picture subtitles (PGS, DVD, DVB) must be inside the video file, and the subtitle styles only apply to text subtitles. In a vertical crop, picture subtitles are scaled down to the frame width so whole lines stay visible.
 - Styled ASS subtitles (common for anime) lose their own styling and positioning: they are converted to plain text and drawn in the chosen style.

@@ -1,9 +1,10 @@
 import { useEffect } from "preact/hooks";
 import type { PreviewPlayer } from "./preview";
-import type { TimingControls } from "./useTiming";
+import type { PartsControls } from "./useParts";
 
 // The editor's keyboard shortcuts (listed by ShortcutHelp and in the README).
-export function useShortcuts(player: PreviewPlayer, timing: TimingControls): void {
+// Start and end are those of the selected part.
+export function useShortcuts(player: PreviewPlayer, timing: PartsControls): void {
     useEffect(() => {
         function onKey(event: KeyboardEvent): void {
             if (event.ctrlKey || event.metaKey || event.altKey) return;

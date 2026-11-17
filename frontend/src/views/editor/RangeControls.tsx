@@ -1,26 +1,29 @@
 import { useState } from "preact/hooks";
 import { classes, fmtRuntime, fmtTime, parseTime } from "../../lib/format";
+import { partsProblem, selectedPart, totalLength, type ClipParts } from "./parts";
 import type { PreviewPlayer } from "./preview";
-import { timingProblem, type Timing } from "./timing";
-import type { TimingControls } from "./useTiming";
+import type { PartsControls } from "./useParts";
 
 interface Props {
-    timing: Timing;
-    controls: TimingControls;
+    parts: ClipParts;
+    controls: PartsControls;
     player: PreviewPlayer;
     // Longest clip allowed in seconds; 0 for no limit.
     maxClipSeconds: number;
 }
 
-// The start and end of the clip as editable times, with buttons to fine
-// tune them, and the resulting clip length.
-export function RangeControls({ timing, controls, player, maxClipSeconds }: Props) {
+// The start and end of the selected part as editable times, with buttons
+// to fine tune them, and the length of the whole clip.
+export function RangeControls({ parts, controls, player, maxClipSeconds }: Props) {
+    const part = selectedPart(parts);
+    const count = parts.list.length;
     return (
         <div class="range-controls">
+            {count > 1 ? <div class="range-part muted">{`Part ${parts.selected + 1} of ${count}`}</div> : null}
             <RangeRow
                 label="Start"
-                value={timing.start}
-                timing={timing}
+                value={part.start}
+                parts={parts}
                 setKey="I"
                 jumpKey="["
                 onSet={controls.setStart}
@@ -29,8 +32,8 @@ export function RangeControls({ timing, controls, player, maxClipSeconds }: Prop
             />
             <RangeRow
                 label="End"
-                value={timing.end}
-                timing={timing}
+                value={part.end}
+                parts={parts}
                 setKey="O"
                 jumpKey="]"
                 onSet={controls.setEnd}
@@ -38,12 +41,18 @@ export function RangeControls({ timing, controls, player, maxClipSeconds }: Prop
                 playheadTime={() => player.sourceTime()}
             />
             <div class="range-summary">
-                <span class={classes("duration mono", timingProblem(timing, maxClipSeconds) && "over")}>
-                    {`Clip length ${fmtTime(timing.end - timing.start)}`}
+                <span class={classes("duration mono", partsProblem(parts, maxClipSeconds) && "over")}>
+                    {`Clip length ${fmtTime(totalLength(parts))}`}
                 </span>
+                {count > 1 ? <span class="muted">{`${count} parts`}</span> : null}
                 {maxClipSeconds ? <span class="muted">{`Maximum ${fmtRuntime(maxClipSeconds)}`}</span> : null}
-                <button class="btn small" type="button" title="Play from start to end (P)" onClick={() => player.playSelection()}>
-                    ▶ Play selection
+                <button
+                    class="btn small"
+                    type="button"
+                    title={count > 1 ? "Play the selected part from start to end (P)" : "Play from start to end (P)"}
+                    onClick={() => player.playSelection()}
+                >
+                    {count > 1 ? "▶ Play part" : "▶ Play selection"}
                 </button>
             </div>
         </div>
@@ -52,9 +61,9 @@ export function RangeControls({ timing, controls, player, maxClipSeconds }: Prop
 
 interface RowProps {
     label: string;
-    // The time this row edits (the start or the end).
+    // The time this row edits (the start or the end of the selected part).
     value: number;
-    timing: Timing;
+    parts: ClipParts;
     // Keyboard shortcuts for the two buttons, shown in their tooltips.
     setKey: string;
     jumpKey: string;
@@ -65,12 +74,12 @@ interface RowProps {
 
 const NUDGES = [-1, -0.1, 0.1, 1];
 
-function RangeRow({ label, value, timing, setKey, jumpKey, onSet, onJump, playheadTime }: RowProps) {
+function RangeRow({ label, value, parts, setKey, jumpKey, onSet, onJump, playheadTime }: RowProps) {
     const name = label.toLowerCase();
     return (
         <div class="range-row">
             <label>{label}</label>
-            <TimeInput label={`${label} time`} value={value} timing={timing} onApply={onSet} />
+            <TimeInput label={`${label} time`} value={value} parts={parts} onApply={onSet} />
             <button
                 class="btn small"
                 type="button"
@@ -96,19 +105,20 @@ function RangeRow({ label, value, timing, setKey, jumpKey, onSet, onJump, playhe
 interface TimeInputProps {
     label: string;
     value: number;
-    timing: Timing;
+    parts: ClipParts;
     onApply(time: number): void;
 }
 
 // A time as text ("00:01:23.500"). What is typed takes effect when the
 // field is left or Enter is pressed; text that is not a time is marked.
-function TimeInput({ label, value, timing, onApply }: TimeInputProps) {
-    // What has been typed but not applied yet. It belongs to the timing it
-    // was typed against: any change to the range (applying this edit, a
-    // nudge, a drag on the timeline...) makes a new timing object, which
-    // drops the edit and shows the real value again.
-    const [edit, setEdit] = useState<{ text: string; invalid: boolean; timing: Timing } | null>(null);
-    const draft = edit?.timing === timing ? edit : null;
+function TimeInput({ label, value, parts, onApply }: TimeInputProps) {
+    // What has been typed but not applied yet. It belongs to the state of
+    // the parts it was typed against: any change (applying this edit, a
+    // nudge, a drag on the timeline, selecting another part...) makes a new
+    // state object (see useParts), which drops the edit and shows the real
+    // value again.
+    const [edit, setEdit] = useState<{ text: string; invalid: boolean; parts: ClipParts } | null>(null);
+    const draft = edit?.parts === parts ? edit : null;
 
     return (
         <input
@@ -118,11 +128,11 @@ function TimeInput({ label, value, timing, onApply }: TimeInputProps) {
             autocomplete="off"
             aria-label={label}
             value={draft ? draft.text : fmtTime(value)}
-            onInput={(event) => setEdit({ text: event.currentTarget.value, invalid: false, timing })}
+            onInput={(event) => setEdit({ text: event.currentTarget.value, invalid: false, parts })}
             onChange={(event) => {
                 const text = event.currentTarget.value;
                 const time = parseTime(text);
-                if (Number.isNaN(time)) setEdit({ text, invalid: true, timing });
+                if (Number.isNaN(time)) setEdit({ text, invalid: true, parts });
                 else onApply(time);
             }}
         />
