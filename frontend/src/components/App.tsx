@@ -18,7 +18,7 @@ import { Notice } from "./ui";
 // The whole single page app: top bar, the view for the current address,
 // and toast messages.
 export function App() {
-    const [route, rerun] = useRoute();
+    const route = useRoute();
     const [me, setMe] = useState<Me | null>(null);
     const [error, setError] = useState("");
     const [signingOut, setSigningOut] = useState(false);
@@ -60,7 +60,7 @@ export function App() {
             <TopBar
                 route={route}
                 userName={me?.name ?? ""}
-                onSearch={(query) => navigate(`#/search?${new URLSearchParams({ q: query })}`, rerun)}
+                onSearch={(query) => navigate(`#/search?${new URLSearchParams({ q: query })}`)}
                 onSignOut={() => setSigningOut(true)}
             />
             <main>{content}</main>
@@ -83,7 +83,7 @@ function RouteView({ route }: { route: Route }) {
         case "search":
             return <SearchView query={param("q")} />;
         case "item":
-            return <EditorView itemId={id} />;
+            return <EditorView itemId={id} reclipId={param("reclip")} />;
         case "clips":
             return <ClipsView />;
         case "public":

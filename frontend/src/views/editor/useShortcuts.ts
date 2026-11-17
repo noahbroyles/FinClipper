@@ -1,9 +1,10 @@
 import { useEffect } from "preact/hooks";
 import type { PreviewPlayer } from "./preview";
-import type { TimingControls } from "./useTiming";
+import type { PartsControls } from "./useParts";
 
 // The editor's keyboard shortcuts (listed by ShortcutHelp and in the README).
-export function useShortcuts(player: PreviewPlayer, timing: TimingControls): void {
+// Start and end are those of the selected part.
+export function useShortcuts(player: PreviewPlayer, timing: PartsControls): void {
     useEffect(() => {
         function onKey(event: KeyboardEvent): void {
             if (event.ctrlKey || event.metaKey || event.altKey) return;
@@ -31,8 +32,10 @@ export function useShortcuts(player: PreviewPlayer, timing: TimingControls): voi
                 case "P":
                     player.playSelection();
                     break;
-                case " ":
-                    if (onVideo || target.closest("button, a")) return;
+                // Not Space: the browser already uses it to press whatever
+                // button has focus and to scroll the page.
+                case "k":
+                case "K":
                     player.togglePlay();
                     break;
                 case "ArrowLeft":

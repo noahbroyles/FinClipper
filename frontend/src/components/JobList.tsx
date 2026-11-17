@@ -5,8 +5,10 @@ import { CLIP_NAME_MAX } from "../constants";
 import { isActive, type ClipJobs } from "../hooks/useClipJobs";
 import { api, BASE } from "../lib/api";
 import { errorMessage, fmtBytes, fmtRuntime, fmtTime } from "../lib/format";
+import { navigate } from "../lib/router";
 import { toast } from "../lib/toast";
-import type { Job } from "../types";
+import { ClipPlayer } from "./ClipPlayer";
+import type { ClipRange, Job } from "../types";
 
 export function jobStatusText(job: Job): string {
     switch (job.status) {
@@ -88,7 +90,11 @@ interface RowProps {
 }
 
 function JobRow({ job, showItemLink, renaming, onRenameStart, onRenameCancel, onRenamed, run }: RowProps) {
+    const [watching, setWatching] = useState(false);
     const active = isActive(job);
+    const downloadUrl = `${BASE}api/clips/${job.id}/download`;
+    // Opens the editor for the clip's video with this clip's settings.
+    const reclipUrl = `#/item/${job.item_id}?${new URLSearchParams({ reclip: job.id })}`;
     const percent = `${Math.round(job.progress * 100)}%`;
     const itemTitle = showItemLink ? <a href={`#/item/${job.item_id}`}>{job.title}</a> : job.title;
 
@@ -118,9 +124,7 @@ function JobRow({ job, showItemLink, renaming, onRenameStart, onRenameCancel, on
                     {itemTitle}
                 </div>
             ) : null}
-            <div class="job-meta mono">
-                {`${fmtTime(job.start)} → ${fmtTime(job.end)}  (${fmtRuntime(job.duration) || "0s"})`}
-            </div>
+            <ClipRanges parts={job.parts} duration={job.duration} />
             <div class="job-meta">{job.description}</div>
             <div class={`job-status ${job.status}`}>
                 {jobStatusText(job)}
@@ -131,11 +135,18 @@ function JobRow({ job, showItemLink, renaming, onRenameStart, onRenameCancel, on
                     <div style={{ width: percent }} />
                 </div>
             ) : null}
+            {watching && job.status === "done" ? <ClipPlayer src={`${downloadUrl}?inline=1`} /> : null}
             <div class="job-actions">
                 {job.status === "done" ? (
-                    <a class="btn small primary" href={`${BASE}api/clips/${job.id}/download`} download={job.filename}>
+                    <a class="btn small primary" href={downloadUrl} download={job.filename}>
                         Download
                     </a>
+                ) : null}
+                {/* Only MP4 clips can be watched; browsers rarely play MKV. */}
+                {job.status === "done" && job.playable ? (
+                    <button class="btn small" type="button" aria-pressed={watching} onClick={() => setWatching(!watching)}>
+                        Watch
+                    </button>
                 ) : null}
                 <button class="btn small" type="button" onClick={onRenameStart}>
                     Rename
@@ -145,6 +156,17 @@ function JobRow({ job, showItemLink, renaming, onRenameStart, onRenameCancel, on
                         {job.public ? "Make private" : "Make public"}
                     </button>
                 ) : null}
+                <a
+                    class="btn small"
+                    href={reclipUrl}
+                    title="Open the editor with this clip's settings, to make a changed copy"
+                    onClick={(event) => {
+                        event.preventDefault();
+                        navigate(reclipUrl);
+                    }}
+                >
+                    Re-clip
+                </a>
                 {active ? (
                     <button
                         class="btn small"
@@ -163,6 +185,25 @@ function JobRow({ job, showItemLink, renaming, onRenameStart, onRenameCancel, on
                     </button>
                 )}
             </div>
+        </div>
+    );
+}
+
+// The time range of a clip and its length, or for a multi-part clip the
+// number of parts, the total length, and then each part's range.
+export function ClipRanges({ parts, duration }: { parts: ClipRange[]; duration: number }) {
+    const length = fmtRuntime(duration) || "0s";
+    const range = (part: ClipRange) => `${fmtTime(part.start)} → ${fmtTime(part.end)}`;
+    const only = parts.length === 1 ? parts[0] : undefined;
+    if (only) return <div class="job-meta mono">{`${range(only)}  (${length})`}</div>;
+    return (
+        <div class="job-meta mono">
+            {`${parts.length} parts  (${length})`}
+            <ol class="job-parts">
+                {parts.map((part, index) => (
+                    <li key={index}>{range(part)}</li>
+                ))}
+            </ol>
         </div>
     );
 }

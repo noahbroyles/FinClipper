@@ -130,6 +130,56 @@ class TitleAndFilenameTests(unittest.TestCase):
                 media.clean_clip_name(value)
 
 
+class ClipPartsTests(unittest.TestCase):
+    def test_plain_clip_is_one_part(self):
+        parts = media.parse_clip_parts({"start": "1:00", "end": 75.5, "crop_x": 0.25, "crop_width": 0.5})
+        self.assertEqual(parts, [{"start": 60.0, "end": 75.5, "crop_x": 0.25, "crop_width": 0.5}])
+
+    def test_defaults(self):
+        self.assertEqual(
+            media.parse_clip_parts({"start": 1, "end": 2}), [{"start": 1.0, "end": 2.0, "crop_x": 0.5, "crop_width": 0.0}]
+        )
+
+    def test_parts_keep_their_order_and_their_own_crop(self):
+        parts = media.parse_clip_parts({
+            "crop_x": 0.1,
+            "parts": [
+                {"start": 50, "end": 60, "crop_x": 0.9, "crop_width": 1},
+                {"start": 10, "end": 20},
+            ],
+        })
+        self.assertEqual(parts, [
+            {"start": 50.0, "end": 60.0, "crop_x": 0.9, "crop_width": 1.0},
+            # Falls back to the crop given for the whole clip.
+            {"start": 10.0, "end": 20.0, "crop_x": 0.1, "crop_width": 0.0},
+        ])
+
+    def test_invalid_parts(self):
+        too_many = [{"start": n, "end": n + 1} for n in range(media.MAX_CLIP_PARTS + 1)]
+        for data in (
+            {"parts": []},
+            {"parts": "1-2"},
+            {"parts": [[1, 2]]},
+            {"parts": too_many},
+            {"parts": [{"start": 1}]},
+            {"parts": [{"start": 1, "end": 2, "crop_x": 1.5}]},
+            {"parts": [{"start": 1, "end": 2, "crop_width": float("nan")}]},
+            {"start": 1, "end": 2, "crop_x": True},
+            {},
+        ):
+            with self.subTest(data=data):
+                with self.assertRaises(ValueError):
+                    media.parse_clip_parts(data)
+
+    def test_most_parts_allowed(self):
+        parts = [{"start": n, "end": n + 1} for n in range(media.MAX_CLIP_PARTS)]
+        self.assertEqual(len(media.parse_clip_parts({"parts": parts})), media.MAX_CLIP_PARTS)
+
+    def test_filename_of_a_multi_part_clip(self):
+        self.assertEqual(media.clip_filename("Film", 63, 75, "mp4", more_parts=2), "Film [00.01.03-00.01.15 + 2 more].mp4")
+        self.assertEqual(media.clip_filename("Film", 63, 75, "mp4", "Best bits", more_parts=2), "Best bits.mp4")
+
+
 class StreamSelectionTests(unittest.TestCase):
     source = {
         "Id": "abc",
@@ -212,6 +262,31 @@ class SubtitleTests(unittest.TestCase):
         ])
         self.assertIn("PlayResY: 1080", ass)
         self.assertIn("Style: Default,Liberation Sans,56,", ass)
+
+    def test_build_ass_parts_places_cues_in_the_spliced_clip(self):
+        srt = (
+            "1\n00:00:11,000 --> 00:00:12,000\nIn the first part\n\n"
+            "2\n00:00:14,000 --> 00:00:16,000\nBetween the parts\n\n"
+            "3\n00:00:19,000 --> 00:00:22,000\nAcross the start of the second\n\n"
+            "4\n00:00:50,000 --> 00:00:51,000\nIn the part played last\n"
+        )
+        # Played in this order: 20-25 s (5 s), then 10-13 s (3 s), then 49-52 s.
+        ass = media.build_ass_parts(srt, [(20, 25), (10, 13), (49, 52)], "classic", "horizontal")
+        events = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+        self.assertEqual(events, [
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,Across the start of the second",
+            "Dialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,In the first part",
+            "Dialogue: 0,0:00:09.00,0:00:10.00,Default,,0,0,0,,In the part played last",
+        ])
+
+    def test_build_ass_parts_shows_a_cue_on_both_sides_of_a_join(self):
+        srt = "1\n00:00:04,000 --> 00:00:07,000\nLong line\n"
+        ass = media.build_ass_parts(srt, [(0, 5), (6, 10)], "classic", "horizontal")
+        events = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+        self.assertEqual(events, [
+            "Dialogue: 0,0:00:04.00,0:00:05.00,Default,,0,0,0,,Long line",
+            "Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,Long line",
+        ])
 
     def test_build_ass_vertical_canvas_and_line_breaks(self):
         ass = media.build_ass("1\n00:00:00,000 --> 00:00:01,000\nOne\nTwo\n", 0, 5, "boxed", "vertical")
@@ -367,6 +442,74 @@ class PlanAndCommandTests(unittest.TestCase):
         graph = cmd[cmd.index("-filter_complex") + 1]
         self.assertIn("(iw-min(iw,ih*9/16))*0.3500", graph)
 
+    def multipart(self, parts, audio=None, max_height=0, **options):
+        plan = media.plan_output("precise", self.video, audio)
+        parts = [dict({"crop_x": 0.5, "crop_width": 0.0}, **part) for part in parts]
+        cmd = media.build_multipart_command("/m/in.mkv", parts, self.video, audio, max_height, "/o/x.part", plan, **options)
+        return cmd, cmd[cmd.index("-filter_complex") + 1]
+
+    def test_multipart_opens_the_source_once_per_part(self):
+        cmd, graph = self.multipart([{"start": 50, "end": 62.5}, {"start": 10, "end": 12}], self.audio_ok)
+        inputs = [number for number, arg in enumerate(cmd) if arg == "-i"]
+        self.assertEqual(len(inputs), 2)
+        # Each input seeks to its part and reads only that part.
+        self.assertEqual(cmd[inputs[0] - 4:inputs[0] + 2], ["-ss", "50.000", "-t", "12.500", "-i", "/m/in.mkv"])
+        self.assertEqual(cmd[inputs[1] - 4:inputs[1] + 2], ["-ss", "10.000", "-t", "2.000", "-i", "/m/in.mkv"])
+        # Video and audio of the parts are joined in the order given.
+        self.assertTrue(graph.endswith("[v0][0:1][v1][1:1]concat=n=2:v=1:a=1[vout][aout]"), graph)
+        self.assertIn("[0:0]", graph)
+        self.assertIn("[1:0]", graph)
+        self.assertEqual(cmd[cmd.index("[vout]") - 1], "-map")
+        self.assertEqual(cmd[cmd.index("[aout]") - 1], "-map")
+        self.assertEqual(cmd[cmd.index("-c:v") + 1], "libx264")
+        self.assertEqual(cmd[-3:], ["-f", "mp4", "/o/x.part"])
+
+    def test_multipart_without_audio(self):
+        cmd, graph = self.multipart([{"start": 1, "end": 2}, {"start": 3, "end": 4}, {"start": 5, "end": 6}])
+        self.assertTrue(graph.endswith("[v0][v1][v2]concat=n=3:v=1:a=0[vout]"), graph)
+        self.assertNotIn("[aout]", cmd)
+        self.assertNotIn("-c:a", cmd)
+
+    def test_multipart_crops_each_part_on_its_own(self):
+        cmd, graph = self.multipart(
+            [{"start": 1, "end": 2, "crop_x": 0.1, "crop_width": 0.2}, {"start": 3, "end": 4, "crop_x": 0.9, "crop_width": 0.6}],
+            max_height=1280, layout="vertical", fit="crop",
+        )
+        first, second = graph.split("[v0];")
+        self.assertIn(":x='(iw-ow)*0.1000'", first)
+        self.assertIn("*0.2000)/2)*2'", first)
+        self.assertIn(":x='(iw-ow)*0.9000'", second)
+        self.assertIn("*0.6000)/2)*2'", second)
+
+    def test_multipart_pad_names_do_not_clash(self):
+        # The blurred background and picture subtitles use named pads inside
+        # each part's chains; a name used twice would make the graph invalid.
+        cmd, graph = self.multipart(
+            [{"start": 1, "end": 2}, {"start": 3, "end": 4}],
+            max_height=1280, layout="vertical", fit="blur", subtitle={"kind": "bitmap", "index": 3},
+        )
+        for name in ("[0:3]", "[1:3]"):
+            self.assertIn(name, graph)
+        pads = ("[pre0]", "[pre1]", "[subs0]", "[subs1]", "[fg0]", "[fg1]", "[bgsrc0]", "[bgsrc1]", "[bg0]", "[bg1]", "[v0]", "[v1]")
+        wrong = [pad for pad in pads if graph.count(pad) != 2]
+        self.assertEqual(wrong, [], "each named pad is made once and used once")
+
+    def test_multipart_text_subtitles_are_drawn_after_the_join(self):
+        cmd, graph = self.multipart(
+            [{"start": 1, "end": 2}, {"start": 3, "end": 4}], self.audio_ok, subtitle={"kind": "text", "file": "abc.ass"}
+        )
+        self.assertIn("concat=n=2:v=1:a=1[joined][aout];[joined]subtitles=filename=abc.ass[vout]", graph)
+        self.assertEqual(graph.count("subtitles="), 1)
+
+    def test_multipart_http_headers_before_every_input(self):
+        cmd, graph = self.multipart([{"start": 1, "end": 2}, {"start": 3, "end": 4}], http_headers="Authorization: x\r\n")
+        inputs = [number for number, arg in enumerate(cmd) if arg == "-i"]
+        headers = [number for number, arg in enumerate(cmd) if arg == "-headers"]
+        self.assertEqual(len(headers), 2)
+        self.assertLess(headers[0], inputs[0])
+        self.assertTrue(inputs[0] < headers[1] < inputs[1])
+        self.assertEqual(cmd.count("-reconnect"), 2)
+
     def test_text_subtitle_file_must_be_a_plain_name(self):
         plan = media.plan_output("precise", self.video, None)
         for name in ("/data/clips/x.ass", "a:b.ass", "x'.ass", "a,b.ass"):
@@ -375,6 +518,8 @@ class PlanAndCommandTests(unittest.TestCase):
                     "/m/in.mkv", 0, 5, self.video, None, "precise", 0, "/o/x.part", plan,
                     subtitle={"kind": "text", "file": name},
                 )
+            with self.assertRaises(ValueError):
+                self.multipart([{"start": 1, "end": 2}, {"start": 3, "end": 4}], subtitle={"kind": "text", "file": name})
 
     def test_bitmap_subtitles_read_from_input(self):
         plan = media.plan_output("precise", self.video, None)
@@ -474,6 +619,126 @@ class FfmpegIntegrationTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_FFMPEG, "ffmpeg is not installed")
+class MultipartIntegrationTests(unittest.TestCase):
+    """Splice parts of a synthetic video with ffmpeg.
+
+    Frame number n of the source (25 a second, so n = 25 x seconds) is
+    white in its first n columns and black in the rest. Counting the white
+    pixels in a row of an output frame tells which source frame it is.
+    """
+
+    video = {"Index": 0, "Codec": "h264", "Width": 640, "Height": 90}
+    audio = {"Index": 1, "Codec": "aac", "Channels": 2}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+        cls.src = cls.tmp / "counter.mkv"
+        # 20 s with a keyframe every 5 s, so parts start between keyframes.
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "nullsrc=size=640x90:rate=25:duration=20,geq=lum='if(lt(X,N),235,16)':cb=128:cr=128",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+                "-c:v", "libx264", "-preset", "ultrafast", "-g", "125", "-keyint_min", "125", "-sc_threshold", "0",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", str(cls.src),
+            ],
+            check=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def splice(self, name, parts, audio=None, max_height=0, **options):
+        plan = media.plan_output("precise", self.video, audio)
+        out = self.tmp / f"{name}.mp4"
+        parts = [dict({"crop_x": 0.5, "crop_width": 0.0}, **part) for part in parts]
+        cmd = media.build_multipart_command(
+            self.src, parts, self.video, audio, max_height, out, plan, preset="ultrafast", **options
+        )
+        result = subprocess.run(cmd, cwd=self.tmp, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("progress=end", result.stdout)
+        return out
+
+    def probe(self, path):
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_name,codec_type,width,height,channels,duration",
+             "-of", "json", str(path)],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        return json.loads(out)
+
+    def frames(self, path):
+        """The frames of a video, each as a list of rows of grey values (0-255)."""
+        info = next(s for s in self.probe(path)["streams"] if s["codec_type"] == "video")
+        width, height = info["width"], info["height"]
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+            check=True, capture_output=True,
+        ).stdout
+        size = width * height
+        return [
+            [raw[at + row * width:at + (row + 1) * width] for row in range(height)]
+            for at in range(0, len(raw), size)
+        ]
+
+    def test_parts_are_joined_in_order_and_frame_accurate(self):
+        # Out of order on purpose, and only the second starts on a keyframe.
+        parts = [{"start": 2.0, "end": 4.0}, {"start": 10.0, "end": 11.52}, {"start": 6.0, "end": 7.0}]
+        expected = [*range(50, 100), *range(250, 288), *range(150, 175)]
+        for label, audio in (("silent", None), ("sound", self.audio)):
+            with self.subTest(label):
+                out = self.splice(f"order-{label}", parts, audio)
+                info = self.probe(out)
+                video = next(s for s in info["streams"] if s["codec_type"] == "video")
+                self.assertEqual((video["codec_name"], video["width"], video["height"]), ("h264", 640, 90))
+                # 2 s + 1.52 s + 1 s.
+                self.assertAlmostEqual(float(info["format"]["duration"]), 4.52, delta=0.15)
+                if audio:
+                    sound = next(s for s in info["streams"] if s["codec_type"] == "audio")
+                    self.assertEqual((sound["codec_name"], sound["channels"]), ("aac", 2))
+                    self.assertAlmostEqual(float(sound["duration"]), 4.52, delta=0.15)
+
+                shown = [sum(1 for value in frame[45] if value > 128) for frame in self.frames(out)]
+                # Every frame of every part, in order and none missing. The
+                # encoder may hold a frame once where a part starts, to cover
+                # a gap of less than a frame (see _multipart_graph).
+                once = [number for at, number in enumerate(shown) if at == 0 or number != shown[at - 1]]
+                self.assertEqual(once, expected)
+                self.assertLessEqual(len(shown) - len(expected), len(parts))
+
+    def test_each_part_has_its_own_vertical_crop(self):
+        # 540x960 frame, from the end of the source where the picture is
+        # mostly white. The first part is the narrowest crop, which fills
+        # the frame; the second keeps the whole picture, 540x76 with black
+        # bars above and below.
+        parts = [{"start": 16.0, "end": 17.0, "crop_width": 0.0}, {"start": 18.0, "end": 19.0, "crop_width": 1.0}]
+        out = self.splice("crops", parts, None, max_height=960, layout="vertical", fit="crop")
+        info = self.probe(out)["streams"][0]
+        self.assertEqual((info["width"], info["height"]), (540, 960))
+        frames = self.frames(out)
+        self.assertIn(len(frames), (50, 51, 52))
+
+        def is_black(row):
+            return sum(row) / len(row) < 8
+
+        self.assertFalse(is_black(frames[10][20]))
+        self.assertFalse(is_black(frames[10][940]))
+        self.assertTrue(is_black(frames[40][20]))
+        self.assertTrue(is_black(frames[40][940]))
+        self.assertFalse(is_black(frames[40][480]))
+
+    def test_blurred_background_parts(self):
+        parts = [{"start": 16.0, "end": 16.6}, {"start": 18.0, "end": 18.6}]
+        out = self.splice("blur", parts, self.audio, max_height=960, layout="vertical", fit="blur")
+        info = next(s for s in self.probe(out)["streams"] if s["codec_type"] == "video")
+        self.assertEqual((info["width"], info["height"]), (540, 960))
+        self.assertIn(len(self.frames(out)), (30, 31, 32))
+
+
+@unittest.skipUnless(HAVE_FFMPEG, "ffmpeg is not installed")
 class LayoutAndSubtitleIntegrationTests(unittest.TestCase):
     """Vertical layouts and burned-in subtitles, run through ffmpeg.
 
@@ -568,6 +833,36 @@ class LayoutAndSubtitleIntegrationTests(unittest.TestCase):
             with self.subTest(fit=fit):
                 out = self.run_clip(f"vertical-{fit}", layout="vertical", fit=fit, max_height=960)
                 self.assertEqual(self.size(out), (540, 960, "1:1"))
+
+    def splice(self, name, ranges, subtitle, layout="horizontal", fit="crop", max_height=0):
+        plan = media.plan_output("precise", self.video, None)
+        out = self.tmp / f"{name}.mp4"
+        parts = [{"start": start, "end": end, "crop_x": 0.5, "crop_width": 0.0} for start, end in ranges]
+        cmd = media.build_multipart_command(
+            self.src, parts, self.video, None, max_height, out, plan,
+            preset="ultrafast", layout=layout, fit=fit, subtitle=subtitle,
+        )
+        result = subprocess.run(cmd, cwd=self.tmp, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return out
+
+    def test_text_subtitles_follow_their_part(self):
+        # 0.5-1.5 s has no subtitle; 2.2-2.8 s is inside the cue. In the
+        # clip the second part runs from 1.0 s to 1.6 s.
+        ranges = [(0.5, 1.5), (2.2, 2.8)]
+        (self.tmp / "parts.ass").write_text(media.build_ass_parts(self.srt, ranges, "classic", "horizontal"), encoding="utf-8")
+        out = self.splice("text-parts", ranges, {"kind": "text", "file": "parts.ass"})
+        self.assertEqual(self.bright_pixels(out, 0.5, top=0.6), 0)
+        self.assertGreater(self.bright_pixels(out, 1.3, top=0.6), 100)
+
+    def test_picture_subtitles_follow_their_part(self):
+        for layout, fit, max_height in (("horizontal", "crop", 0), ("vertical", "crop", 960), ("vertical", "bars", 960)):
+            with self.subTest(layout=layout, fit=fit):
+                out = self.splice(
+                    f"bitmap-parts-{layout}-{fit}", [(0.5, 1.5), (2.2, 2.8)], {"kind": "bitmap", "index": 1}, layout, fit, max_height
+                )
+                self.assertEqual(self.bright_pixels(out, 0.5), 0)
+                self.assertGreater(self.bright_pixels(out, 1.3), 100)
 
     def test_vertical_crop_width(self):
         # The 640x360 source in a 540x960 frame. The narrowest crop fills

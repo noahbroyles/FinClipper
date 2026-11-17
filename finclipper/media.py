@@ -106,6 +106,10 @@ SUBTITLE_CANVAS = {
 # Characters that are not allowed in file names on common filesystems.
 _UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*]')
 
+# Most parts a multi-part clip may be spliced from. The UI is told the
+# limit by /api/me.
+MAX_CLIP_PARTS = 20
+
 # Longest name a user may give a clip. Must match CLIP_NAME_MAX in
 # frontend/src/constants.ts.
 MAX_CLIP_NAME_LENGTH = 100
@@ -400,15 +404,61 @@ def clean_clip_name(value):
     return cleaned
 
 
-def clip_filename(title, start, end, extension, name=""):
+def parse_clip_parts(data):
+    """Read the parts of a clip from the body of a "create clip" request.
+
+    "parts" is a list of objects with "start" and "end" (timestamps, see
+    parse_timestamp) and optionally the "crop_x" and "crop_width" of a
+    vertical crop (see VERTICAL_FITS). Parts are played in the order
+    given, which need not be the order they have in the video. A request
+    without "parts" describes a plain clip with "start" and "end" of its
+    own. "crop_x" and "crop_width" next to "parts" apply to every part
+    that does not have its own.
+
+    Returns a list of dicts with start, end, crop_x and crop_width.
+    Raises ValueError with a message for the user.
+    """
+    def fraction(value, default, what):
+        if value is None:
+            return default
+        # NaN and infinity (which Python's JSON parser accepts) fail the range check.
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            raise ValueError(f"Invalid crop {what}")
+        return float(value)
+
+    crop_x = fraction(data.get("crop_x"), 0.5, "position")
+    crop_width = fraction(data.get("crop_width"), 0.0, "width")
+    raw_parts = data.get("parts")
+    if raw_parts is None:
+        raw_parts = [{"start": data.get("start"), "end": data.get("end")}]
+    if not isinstance(raw_parts, list) or not raw_parts or not all(isinstance(raw, dict) for raw in raw_parts):
+        raise ValueError("Invalid clip parts")
+    if len(raw_parts) > MAX_CLIP_PARTS:
+        raise ValueError(f"A clip can have at most {MAX_CLIP_PARTS} parts")
+    return [
+        {
+            "start": parse_timestamp(raw.get("start")),
+            "end": parse_timestamp(raw.get("end")),
+            "crop_x": fraction(raw.get("crop_x"), crop_x, "position"),
+            "crop_width": fraction(raw.get("crop_width"), crop_width, "width"),
+        }
+        for raw in raw_parts
+    ]
+
+
+def clip_filename(title, start, end, extension, name="", more_parts=0):
     """Build the download file name for a clip.
 
     A named clip is saved as "Name.ext". Otherwise the item title and the
-    time range are used: "Title [HH.MM.SS-HH.MM.SS].ext".
+    time range are used: "Title [HH.MM.SS-HH.MM.SS].ext". For a multi-part
+    clip, start and end are those of the first part and more_parts counts
+    the others: "Title [HH.MM.SS-HH.MM.SS + 2 more].ext".
     """
     if name:
         return f"{safe_filename(name)}.{extension}"
     span = f"{format_timestamp(start, '.', False)}-{format_timestamp(end, '.', False)}"
+    if more_parts:
+        span += f" + {more_parts} more"
     return f"{safe_filename(title)} [{span}].{extension}"
 
 
@@ -482,13 +532,20 @@ def _ass_time(seconds):
 
 
 def build_ass(srt_text, start, end, style_key, layout):
+    """Turn a full SubRip track into an ASS file for a clip of one range."""
+    return build_ass_parts(srt_text, [(start, end)], style_key, layout)
+
+
+def build_ass_parts(srt_text, ranges, style_key, layout):
     """Turn a full SubRip track into an ASS file for one clip.
 
-    Only cues that overlap the clip are kept, and their times are shifted
-    so the clip starts at 0, matching the timestamps ffmpeg gives the
-    frames after seeking. A cue already on screen at the start is kept and
-    clipped. style_key picks a SUBTITLE_STYLES entry and layout a
-    SUBTITLE_CANVAS entry.
+    ranges lists the (start, end) of each part of the clip, in the order
+    they are played. Only cues that overlap a part are kept, and their
+    times are shifted to where that part sits in the clip (the first part
+    starts at 0), matching the timestamps of the frames ffmpeg produces. A
+    cue already on screen when a part starts is kept and clipped, so a cue
+    that runs across a join is shown on both sides of it. style_key picks
+    a SUBTITLE_STYLES entry and layout a SUBTITLE_CANVAS entry.
     """
     style = SUBTITLE_STYLES[style_key]
     canvas = SUBTITLE_CANVAS[layout]
@@ -525,18 +582,22 @@ def build_ass(srt_text, start, end, style_key, layout):
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
-    for cue_start, cue_end, cue_lines in parse_srt(srt_text):
-        if cue_end <= start or cue_start >= end:
-            continue
-        shifted_start = max(cue_start, start) - start
-        shifted_end = min(cue_end, end) - start
-        if _ass_time(shifted_end) == _ass_time(shifted_start):
-            # Shorter than a hundredth of a second after clipping.
-            continue
-        lines.append(
-            f"Dialogue: 0,{_ass_time(shifted_start)},{_ass_time(shifted_end)},Default,,0,0,0,,"
-            + _srt_text_to_ass(cue_lines)
-        )
+    cues = parse_srt(srt_text)
+    offset = 0.0  # where the current part starts in the clip
+    for start, end in ranges:
+        for cue_start, cue_end, cue_lines in cues:
+            if cue_end <= start or cue_start >= end:
+                continue
+            shifted_start = max(cue_start, start) - start + offset
+            shifted_end = min(cue_end, end) - start + offset
+            if _ass_time(shifted_end) == _ass_time(shifted_start):
+                # Shorter than a hundredth of a second after clipping.
+                continue
+            lines.append(
+                f"Dialogue: 0,{_ass_time(shifted_start)},{_ass_time(shifted_end)},Default,,0,0,0,,"
+                + _srt_text_to_ass(cue_lines)
+            )
+        offset += end - start
     return "\n".join(lines) + "\n"
 
 
@@ -601,7 +662,74 @@ def _video_graph(video, max_height, layout, fit, crop_x, crop_width, subtitle):
     """Build the -filter_complex graph for a precise (re-encoded) clip.
 
     The graph reads the video stream (and a picture subtitle stream) of
-    input 0 and ends in the [vout] pad. Steps, in order:
+    input 0 and ends in the [vout] pad. See _part_graph for the steps.
+    subtitle is None, {"kind": "text", "file": name} with the ASS file name
+    relative to ffmpeg's working directory, or {"kind": "bitmap", "index": n}
+    with the stream's index in the input file (see file_stream_index).
+    """
+    bitmap = subtitle if subtitle and subtitle["kind"] == "bitmap" else None
+    text = subtitle if subtitle and subtitle["kind"] == "text" else None
+    graph, source, steps = _part_graph(video, max_height, layout, fit, crop_x, crop_width, bitmap)
+    if text:
+        # After the colour conversion, so HDR sources get SDR subtitle colours.
+        steps.append(f"subtitles=filename={text['file']}")
+    graph.append(f"{source}{_join(steps)}[vout]")
+    return ";".join(graph)
+
+
+def _multipart_graph(video, audio, max_height, layout, fit, parts, subtitle):
+    """Build the -filter_complex graph for a clip spliced from several parts.
+
+    Part number n is read from input n (the same file, opened once per
+    part at that part's start). Each part goes through the same steps as a
+    single clip (see _part_graph) with its own crop, then the concat filter
+    joins the parts, video and audio together, so sound stays in step with
+    the picture across the joins. Text subtitles are drawn on the joined
+    video, from an ASS file timed for the whole clip (build_ass_parts).
+
+    A part rarely starts exactly on a frame: its first frame can come up to
+    a frame after its sound starts. The timestamps are left as they are,
+    which keeps picture and sound exactly in step. The price is that the
+    encoder now and then holds the last frame of a part for one extra
+    frame to cover such a gap. (Shifting each part's video to start at 0
+    with setpts would avoid that, but setpts drops the frame durations,
+    which loses the last frame of the clip, and puts the picture up to a
+    frame ahead of the sound.)
+
+    The graph ends in the [vout] pad and, when there is audio, [aout].
+    """
+    bitmap = subtitle if subtitle and subtitle["kind"] == "bitmap" else None
+    text = subtitle if subtitle and subtitle["kind"] == "text" else None
+    graph = []
+    pads = ""
+    for number, part in enumerate(parts):
+        part_graph, source, steps = _part_graph(
+            video, max_height, layout, fit, part["crop_x"], part["crop_width"], bitmap, number
+        )
+        graph += part_graph
+        graph.append(f"{source}{_join(steps)}[v{number}]")
+        pads += f"[v{number}]"
+        if audio is not None:
+            pads += f"[{number}:{audio['Index']}]"
+    audio_out = "[aout]" if audio is not None else ""
+    joined = f"{pads}concat=n={len(parts)}:v=1:a={1 if audio is not None else 0}"
+    if text:
+        graph.append(f"{joined}[joined]{audio_out}")
+        graph.append(f"[joined]subtitles=filename={text['file']}[vout]")
+    else:
+        graph.append(f"{joined}[vout]{audio_out}")
+    return ";".join(graph)
+
+
+def _part_graph(video, max_height, layout, fit, crop_x, crop_width, bitmap, number=None):
+    """Filter chains that turn the video of one input into finished frames.
+
+    Returns (graph, source, steps): the chains that are complete, and the
+    input pads and filters of the last chain, which the caller finishes
+    and names. number is the input to read for a part of a multi-part
+    clip (it also keeps the pad names of the parts apart), or None for a
+    single clip, which reads input 0. bitmap is None or a picture subtitle
+    {"kind": "bitmap", "index": n} to draw. Steps, in order:
 
     1. deinterlace (yadif) when Jellyfin reports interlaced video
     2. picture subtitles, drawn at the source resolution, unless the clip
@@ -613,22 +741,20 @@ def _video_graph(video, max_height, layout, fit, crop_x, crop_width, subtitle):
     4. vertical crop only: picture subtitles are scaled to the frame width
        and drawn after the crop, because a crop would cut off the ends of
        most lines
-    5. text subtitles (an ASS file made by build_ass) on the final frame
+    5. conversion to the pixel format the encoder is given
 
-    HDR tone mapping runs right after the first resize, so the expensive
-    float conversion happens at the output resolution, not the source's.
-    subtitle is None, {"kind": "text", "file": name} with the ASS file name
-    relative to ffmpeg's working directory, or {"kind": "bitmap", "index": n}
-    with the stream's index in the input file (see file_stream_index).
+    Text subtitles are added by the caller, on the final frame. HDR tone
+    mapping runs right after the first resize, so the expensive float
+    conversion happens at the output resolution, not the source's.
     """
     is_hdr = (video.get("VideoRange") or "").upper() == "HDR"
     tonemap = _tonemap_filters(video) if is_hdr else []
-    bitmap = subtitle if subtitle and subtitle["kind"] == "bitmap" else None
-    text = subtitle if subtitle and subtitle["kind"] == "text" else None
     vertical_crop = layout == "vertical" and fit == "crop"
+    file = number or 0  # which input to read
+    tag = "" if number is None else str(number)  # makes pad names unique per part
 
     graph = []  # finished chains, joined with ";" at the end
-    source = f"[0:{video['Index']}]"  # input pad(s) of the chain being built
+    source = f"[{file}:{video['Index']}]"  # input pad(s) of the chain being built
     steps = ["yadif"] if video.get("IsInterlaced") else []
 
     if bitmap and not vertical_crop:
@@ -637,9 +763,9 @@ def _video_graph(video, max_height, layout, fit, crop_x, crop_width, subtitle):
         # shape. Scaling the canvas to the video width and pinning it to the
         # bottom keeps the text on screen either way.
         canvas = f"scale=w={video['Width']}:h=-2" if video.get("Width") else "null"
-        graph.append(f"{source}{_join(steps)}[pre]")
-        graph.append(f"[0:{bitmap['index']}]{canvas}[subs]")
-        source = "[pre][subs]"
+        graph.append(f"{source}{_join(steps)}[pre{tag}]")
+        graph.append(f"[{file}:{bitmap['index']}]{canvas}[subs{tag}]")
+        source = f"[pre{tag}][subs{tag}]"
         steps = ["overlay=x=(W-w)/2:y=H-h:eof_action=pass"]
 
     if layout == "horizontal":
@@ -674,30 +800,26 @@ def _video_graph(video, max_height, layout, fit, crop_x, crop_width, subtitle):
             # The background is made from a tiny copy (a tenth of the frame),
             # which makes the blur cheap, then scaled back up.
             small_w, small_h = width // 10 // 2 * 2, height // 10 // 2 * 2
-            steps += [fit_inside, *tonemap, "split=2[fg][bgsrc]"]
+            steps += [fit_inside, *tonemap, f"split=2[fg{tag}][bgsrc{tag}]"]
             graph.append(f"{source}{_join(steps)}")
             graph.append(
-                f"[bgsrc]scale=w={small_w}:h={small_h}:force_original_aspect_ratio=increase,"
-                f"crop={small_w}:{small_h},boxblur=luma_radius=8:luma_power=2,scale={width}:{height}[bg]"
+                f"[bgsrc{tag}]scale=w={small_w}:h={small_h}:force_original_aspect_ratio=increase,"
+                f"crop={small_w}:{small_h},boxblur=luma_radius=8:luma_power=2,scale={width}:{height}[bg{tag}]"
             )
-            source = "[bg][fg]"
+            source = f"[bg{tag}][fg{tag}]"
             steps = ["overlay=x=(W-w)/2:y=(H-h)/2"]
         steps.append("setsar=1")
 
     if bitmap and vertical_crop:
         # Bottom of the scaled canvas at 78% of the frame height, so the
         # text sits where phone captions usually go.
-        graph.append(f"{source}{_join(steps)}[main]")
-        graph.append(f"[0:{bitmap['index']}]scale=w={VERTICAL_SIZES[max_height]}:h=-2[subs]")
-        source = "[main][subs]"
+        graph.append(f"{source}{_join(steps)}[main{tag}]")
+        graph.append(f"[{file}:{bitmap['index']}]scale=w={VERTICAL_SIZES[max_height]}:h=-2[subs{tag}]")
+        source = f"[main{tag}][subs{tag}]"
         steps = ["overlay=x=(W-w)/2:y=H*0.78-h:eof_action=pass"]
 
     steps.append("format=yuv420p")
-    if text:
-        # After the colour conversion, so HDR sources get SDR subtitle colours.
-        steps.append(f"subtitles=filename={text['file']}")
-    graph.append(f"{source}{_join(steps)}[vout]")
-    return ";".join(graph)
+    return graph, source, steps
 
 
 def _tonemap_filters(video):
@@ -761,10 +883,8 @@ def build_ffmpeg_command(
     """
     if mode != "precise" and (layout != "horizontal" or subtitle):
         raise ValueError("Vertical clips and burned-in subtitles need precise mode")
-    if subtitle and subtitle["kind"] == "text" and not re.fullmatch(r"[\w.-]+", subtitle["file"]):
-        raise ValueError("The subtitle file name must not need escaping")
-    # nice keeps Jellyfin playback responsive while a clip is being encoded.
-    cmd = ["nice", "-n", "10", "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
+    _check_subtitle_file(subtitle)
+    cmd = list(_FFMPEG)
 
     if http_headers:
         # Input options must come before -i. rw_timeout (microseconds)
@@ -789,13 +909,7 @@ def build_ffmpeg_command(
     cmd += ["-map_metadata", "-1", "-map_chapters", "-1"]
 
     if mode == "precise":
-        is_hdr = (video.get("VideoRange") or "").upper() == "HDR"
-        cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-profile:v", "high"]
-        if is_hdr:
-            # Tag the tonemapped output so players do not guess the colors.
-            cmd += ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
-        if audio is not None:
-            cmd += ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+        cmd += _precise_codec_args(video, audio, preset, crf)
     else:
         cmd += ["-c:v", "copy"]
         if plan["format"] == "mp4" and (video.get("Codec") or "").lower() == "hevc":
@@ -816,10 +930,80 @@ def build_ffmpeg_command(
         if plan["format"] == "matroska":
             cmd += ["-avoid_negative_ts", "make_zero"]
 
+    return cmd + _output_args(plan, output_path)
+
+
+def build_multipart_command(
+    source,
+    parts,
+    video,
+    audio,
+    max_height,
+    output_path,
+    plan,
+    preset="veryfast",
+    crf=20,
+    http_headers=None,
+    layout="horizontal",
+    fit="crop",
+    subtitle=None,
+):
+    """Build the ffmpeg argument list for a clip spliced from several parts.
+
+    parts lists the parts in the order they are played, each a dict with
+    "start" and "end" in seconds and the "crop_x" and "crop_width" of a
+    vertical crop (see VERTICAL_FITS), so every part can be framed on its
+    own. The other arguments are as for build_ffmpeg_command.
+
+    Multi-part clips are always re-encoded (precise mode): stream copy can
+    only cut on keyframes, which would show unwanted frames at every join.
+    The source is opened once per part, each seeking straight to its part,
+    and the filter graph joins them (see _multipart_graph).
+    """
+    _check_subtitle_file(subtitle)
+    cmd = list(_FFMPEG)
+    for part in parts:
+        if http_headers:
+            # As for a single clip, plus reconnecting: the inputs of later
+            # parts sit idle while the earlier parts are encoded, and the
+            # server may drop a connection that is not being read.
+            cmd += ["-headers", http_headers, "-rw_timeout", "30000000", "-reconnect", "1", "-reconnect_delay_max", "5"]
+        # -t before -i limits how much of this input is read.
+        cmd += ["-ss", f"{part['start']:.3f}", "-t", f"{part['end'] - part['start']:.3f}", "-i", str(source)]
+
+    cmd += ["-filter_complex", _multipart_graph(video, audio, max_height, layout, fit, parts, subtitle), "-map", "[vout]"]
+    if audio is not None:
+        cmd += ["-map", "[aout]"]
+    cmd += ["-map_metadata", "-1", "-map_chapters", "-1"]
+    cmd += _precise_codec_args(video, audio, preset, crf)
+    return cmd + _output_args(plan, output_path)
+
+
+# Start of every command. nice keeps Jellyfin playback responsive while a
+# clip is being encoded.
+_FFMPEG = ("nice", "-n", "10", "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y")
+
+
+def _check_subtitle_file(subtitle):
+    if subtitle and subtitle["kind"] == "text" and not re.fullmatch(r"[\w.-]+", subtitle["file"]):
+        raise ValueError("The subtitle file name must not need escaping")
+
+
+def _precise_codec_args(video, audio, preset, crf):
+    """Encoder settings for precise mode: H.264 video and stereo AAC audio."""
+    args = ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-profile:v", "high"]
+    if (video.get("VideoRange") or "").upper() == "HDR":
+        # Tag the tonemapped output so players do not guess the colors.
+        args += ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+    if audio is not None:
+        args += ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    return args
+
+
+def _output_args(plan, output_path):
+    args = []
     if plan["format"] == "mp4":
         # Put the index at the front so the clip can start playing while downloading.
-        cmd += ["-movflags", "+faststart"]
-
+        args += ["-movflags", "+faststart"]
     # Machine readable progress on stdout, no interactive stats on stderr.
-    cmd += ["-progress", "pipe:1", "-nostats", "-f", plan["format"], str(output_path)]
-    return cmd
+    return args + ["-progress", "pipe:1", "-nostats", "-f", plan["format"], str(output_path)]

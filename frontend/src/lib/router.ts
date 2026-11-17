@@ -1,6 +1,6 @@
 // Hash based routing: the page shown is chosen by the part of the address
 // after "#", for example "#/library/abc?kind=movies".
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 
 export interface Route {
     // Goes up by one on every navigation, including a repeat of the same
@@ -30,22 +30,23 @@ export function parseHash(hash: string): Pick<Route, "parts" | "params"> {
     };
 }
 
-// The current route, and a function that runs it again. Assigning the same
-// address to location.hash fires no hashchange event, so callers use the
-// function for that case (see navigate()).
-export function useRoute(): [route: Route, rerun: () => void] {
+// The current route. It changes on every hashchange event, including the
+// ones navigate() sends for a repeat of the same address.
+export function useRoute(): Route {
     const [nav, setNav] = useState(1);
-    const rerun = useCallback(() => setNav((count) => count + 1), []);
     useEffect(() => {
-        window.addEventListener("hashchange", rerun);
-        return () => window.removeEventListener("hashchange", rerun);
-    }, [rerun]);
-    const route = useMemo(() => ({ nav, ...parseHash(location.hash) }), [nav]);
-    return [route, rerun];
+        const onChange = () => setNav((count) => count + 1);
+        window.addEventListener("hashchange", onChange);
+        return () => window.removeEventListener("hashchange", onChange);
+    }, []);
+    return useMemo(() => ({ nav, ...parseHash(location.hash) }), [nav]);
 }
 
-// Go to a "#/..." address, running the route again if already there.
-export function navigate(target: string, rerun: () => void): void {
-    if (location.hash === target) rerun();
+// Go to a "#/..." address. Assigning the address the page is already at to
+// location.hash fires no hashchange event, so in that case one is sent by
+// hand: the view then starts again from scratch (searching for the same
+// thing again, re-clipping the same clip again).
+export function navigate(target: string): void {
+    if (location.hash === target) window.dispatchEvent(new HashChangeEvent("hashchange"));
     else location.hash = target;
 }

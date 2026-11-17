@@ -1,10 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { initialTiming, timelinePercent, timingProblem, withDuration, withEnd, withStart } from "./timing";
-
-test("a new video has its first 30 seconds selected", () => {
-    expect(initialTiming(600)).toEqual({ start: 0, end: 30, duration: 600 });
-    expect(initialTiming(12)).toEqual({ start: 0, end: 12, duration: 12 });
-});
+import { timelinePercent, timingProblem, withDuration, withEnd, withStart } from "./timing";
 
 describe("withStart", () => {
     const timing = { start: 10, end: 20, duration: 100 };

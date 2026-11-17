@@ -13,10 +13,15 @@ interface Props {
     onAudioChange(index: number): void;
     // Any other option changed.
     onChange(values: Partial<ClipOptions>): void;
+    // The vertical crop of the selected part, and which part that is when
+    // the clip has several (1 for the first), otherwise 0.
+    crop: { cropX: number; cropWidth: number };
+    cropPart: number;
+    onCropChange(crop: { cropX?: number; cropWidth?: number }): void;
     onCreate(): void;
     createDisabled: boolean;
-    // What is wrong with the clip's length, if anything; shown as the
-    // Create button's tooltip.
+    // What is wrong with the length of the clip or its parts, if anything;
+    // shown as the Create button's tooltip.
     createProblem: string;
 }
 
@@ -54,6 +59,8 @@ export function OptionsPanel(props: Props) {
     const subtitle = selectedSubtitle(source, options);
     const vertical = options.layout === "vertical";
     const forcedPrecise = needsPrecise(options);
+    // Each part of a multi-part clip is cropped on its own.
+    const ofPart = props.cropPart ? ` of part ${props.cropPart}` : "";
     const layoutGroup = useId();
     const modeGroup = useId();
 
@@ -156,26 +163,26 @@ export function OptionsPanel(props: Props) {
             ) : null}
             {/* Both sliders move the outline drawn on the preview (CropGuide). */}
             {vertical && options.fit === "crop" ? (
-                <Field label="Crop width (wider adds black bars above and below)">
+                <Field label={`Crop width${ofPart} (wider adds black bars above and below)`}>
                     <input
                         type="range"
                         min="0"
                         max="100"
                         step="1"
-                        value={String(Math.round(options.cropWidth * 100))}
-                        onInput={(event) => onChange({ cropWidth: Number(event.currentTarget.value) / 100 })}
+                        value={String(Math.round(props.crop.cropWidth * 100))}
+                        onInput={(event) => props.onCropChange({ cropWidth: Number(event.currentTarget.value) / 100 })}
                     />
                 </Field>
             ) : null}
             {vertical && options.fit === "crop" ? (
-                <Field label="Crop position (shown on the preview)">
+                <Field label={`Crop position${ofPart} (shown on the preview)`}>
                     <input
                         type="range"
                         min="0"
                         max="100"
                         step="1"
-                        value={String(Math.round(options.cropX * 100))}
-                        onInput={(event) => onChange({ cropX: Number(event.currentTarget.value) / 100 })}
+                        value={String(Math.round(props.crop.cropX * 100))}
+                        onInput={(event) => props.onCropChange({ cropX: Number(event.currentTarget.value) / 100 })}
                     />
                 </Field>
             ) : null}
@@ -203,8 +210,8 @@ export function OptionsPanel(props: Props) {
             </div>
             {forcedPrecise ? (
                 <p class="output-note">
-                    Fast mode copies the video as it is, so it cannot add subtitles or change the shape. Precise mode is
-                    used.
+                    Fast mode copies the video as it is, so it cannot add subtitles, change the shape or join several
+                    parts. Precise mode is used.
                 </p>
             ) : null}
             {options.mode === "precise" ? (

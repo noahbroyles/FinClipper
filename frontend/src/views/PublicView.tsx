@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useState } from "preact/hooks";
+import { ClipPlayer } from "../components/ClipPlayer";
 import { LoadStatus, Notice, PageHead } from "../components/ui";
 import { useLoad } from "../hooks/useLoad";
 import { api, BASE } from "../lib/api";
@@ -78,6 +79,8 @@ function PublicClipRow({ clip, canDownload, canUnshare, onUnshare }: RowProps) {
     const downloadUrl = `${BASE}api/public-clips/${clip.id}/download`;
     const itemTitle = <a href={`#/item/${clip.item_id}`}>{clip.title}</a>;
     const sharer = clip.mine ? "you" : clip.owner_name || "another user";
+    let length = fmtRuntime(clip.duration) || "0s";
+    if (clip.parts.length > 1) length = `${clip.parts.length} parts, ${length}`;
     return (
         <div class="job">
             {/* Same layout as "My clips": a named clip shows the video title below its name. */}
@@ -89,13 +92,9 @@ function PublicClipRow({ clip, canDownload, canUnshare, onUnshare }: RowProps) {
                     {itemTitle}
                 </div>
             ) : null}
-            <div class="job-meta">{`Shared by ${sharer} · ${fmtRuntime(clip.duration) || "0s"} · ${fmtBytes(clip.size)}`}</div>
+            <div class="job-meta">{`Shared by ${sharer} · ${length} · ${fmtBytes(clip.size)}`}</div>
             <div class="job-meta">{clip.description}</div>
-            {watching ? (
-                <div class="public-player">
-                    <ClipPlayer src={`${downloadUrl}?inline=1`} />
-                </div>
-            ) : null}
+            {watching ? <ClipPlayer src={`${downloadUrl}?inline=1`} /> : null}
             {canDownload || canUnshare ? (
                 <div class="job-actions">
                     {/* Only MP4 clips can be watched; browsers rarely play MKV. */}
@@ -118,23 +117,4 @@ function PublicClipRow({ clip, canDownload, canUnshare, onUnshare }: RowProps) {
             ) : null}
         </div>
     );
-}
-
-// Inline player for a shared clip.
-function ClipPlayer({ src }: { src: string }) {
-    const ref = useRef<HTMLVideoElement>(null);
-
-    // A video element keeps playing (and downloading) after it is removed
-    // from the page, so stop it when the player is closed or the page left.
-    useEffect(() => {
-        const video = ref.current;
-        return () => {
-            if (!video) return;
-            video.pause();
-            video.removeAttribute("src");
-            video.load();
-        };
-    }, []);
-
-    return <video ref={ref} controls autoplay playsInline src={src} />;
 }
