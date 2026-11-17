@@ -49,7 +49,8 @@ async function send<T>(path: string, options: ApiOptions): Promise<T> {
     if (options.keepalive) init.keepalive = true;
     const response = await fetch(`${BASE}api${path}`, init);
     if (response.status === 401) {
-        window.location.href = `${BASE}login`;
+        // The address after "#" is kept, to come back to the same page.
+        window.location.href = `${BASE}login${window.location.hash}`;
         throw new Error("Your session expired, please sign in again.");
     }
     if (response.status === 204) return null as T;

@@ -1,10 +1,12 @@
 import { useState } from "preact/hooks";
-import { ClipPlayer } from "../components/ClipPlayer";
+import { ReclipLink } from "../components/ReclipLink";
+import { ShareButton } from "../components/ShareButton";
 import { LoadStatus, Notice, PageHead } from "../components/ui";
 import { useLoad } from "../hooks/useLoad";
 import { api, BASE } from "../lib/api";
 import { errorMessage, fmtBytes, fmtRuntime } from "../lib/format";
 import { publicRetentionText, useMe } from "../lib/me";
+import { watchHref } from "../lib/share";
 import { toast } from "../lib/toast";
 import type { PublicClip, PublicClipList } from "../types";
 
@@ -75,7 +77,6 @@ interface RowProps {
 }
 
 function PublicClipRow({ clip, canDownload, canUnshare, onUnshare }: RowProps) {
-    const [watching, setWatching] = useState(false);
     const downloadUrl = `${BASE}api/public-clips/${clip.id}/download`;
     const itemTitle = <a href={`#/item/${clip.item_id}`}>{clip.title}</a>;
     const sharer = clip.mine ? "you" : clip.owner_name || "another user";
@@ -94,27 +95,27 @@ function PublicClipRow({ clip, canDownload, canUnshare, onUnshare }: RowProps) {
             ) : null}
             <div class="job-meta">{`Shared by ${sharer} · ${length} · ${fmtBytes(clip.size)}`}</div>
             <div class="job-meta">{clip.description}</div>
-            {watching ? <ClipPlayer src={`${downloadUrl}?inline=1`} /> : null}
-            {canDownload || canUnshare ? (
-                <div class="job-actions">
-                    {/* Only MP4 clips can be watched; browsers rarely play MKV. */}
-                    {canDownload && clip.playable ? (
-                        <button class="btn small primary" type="button" onClick={() => setWatching(!watching)}>
-                            Watch
-                        </button>
-                    ) : null}
-                    {canDownload ? (
-                        <a class="btn small" href={downloadUrl} download={clip.filename}>
-                            Download
-                        </a>
-                    ) : null}
-                    {canUnshare ? (
-                        <button class="btn small danger" type="button" onClick={onUnshare}>
-                            {clip.mine ? "Make private" : "Take down"}
-                        </button>
-                    ) : null}
-                </div>
-            ) : null}
+            <div class="job-actions">
+                {/* Only MP4 clips can be watched; browsers rarely play MKV. */}
+                {canDownload && clip.playable ? (
+                    <a class="btn small primary" href={watchHref(clip.id)} target="_blank" rel="noopener">
+                        Watch
+                    </a>
+                ) : null}
+                {canDownload ? (
+                    <a class="btn small" href={downloadUrl} download={clip.filename}>
+                        Download
+                    </a>
+                ) : null}
+                <ShareButton clipId={clip.id} />
+                {/* Making a clip needs the same permission as downloading one. */}
+                {canDownload ? <ReclipLink itemId={clip.item_id} clipId={clip.id} /> : null}
+                {canUnshare ? (
+                    <button class="btn small danger" type="button" onClick={onUnshare}>
+                        {clip.mine ? "Make private" : "Take down"}
+                    </button>
+                ) : null}
+            </div>
         </div>
     );
 }

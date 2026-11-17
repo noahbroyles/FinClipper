@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "preact/hooks";
 
-// Inline player for a finished clip, shown under it in a clip list.
+// Player for a finished clip, on its watch page.
 export function ClipPlayer({ src }: { src: string }) {
     const ref = useRef<HTMLVideoElement>(null);
 

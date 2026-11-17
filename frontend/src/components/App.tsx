@@ -11,6 +11,7 @@ import { HomeView } from "../views/HomeView";
 import { PublicView } from "../views/PublicView";
 import { SearchView } from "../views/SearchView";
 import { SeriesView } from "../views/SeriesView";
+import { WatchView } from "../views/WatchView";
 import { Toast } from "./Toast";
 import { TopBar } from "./TopBar";
 import { Notice } from "./ui";
@@ -88,6 +89,8 @@ function RouteView({ route }: { route: Route }) {
             return <ClipsView />;
         case "public":
             return <PublicView />;
+        case "watch":
+            return <WatchView clipId={id} />;
         default:
             return <Redirect to="#/" />;
     }

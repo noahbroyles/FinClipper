@@ -828,6 +828,69 @@ def list_public_clips():
     )
 
 
+NOT_AVAILABLE = (
+    "This clip is not available. It may have been made private or deleted, or your Jellyfin"
+    " account may not be able to see the video it was cut from."
+)
+
+
+def reachable_job(job_id):
+    """A clip this user may open by its id: their own, or a public one.
+
+    Other users' public clips follow the rule of the public list: only if
+    this user can see the video the clip was cut from. Returns None for
+    anything else, so a link says nothing about clips it does not unlock.
+    """
+    job = owned_job(job_id)
+    if job is not None:
+        return job
+    job = jobs().get_public(job_id) if JOB_ID_RE.match(job_id) else None
+    if job is None or not visible_item_ids({job.item_id}):
+        return None
+    return job
+
+
+@api.get("/watch/<job_id>")
+@login_required_api
+def watch_clip(job_id):
+    """One clip, for the page that plays it (the page a shared link opens)."""
+    job = reachable_job(job_id)
+    if job is None:
+        return bad_request(NOT_AVAILABLE, 404)
+    if job.status != DONE:
+        # Only the owner gets this far for an unfinished clip.
+        return bad_request("This clip is not ready", 409)
+    mine = job.user_id == user_id()
+    # Watching a clip is downloading it, so the same permission applies. The
+    # owner can always download their own clip (see download_clip).
+    return jsonify(dict(job.to_public_dict(user_id()), public=job.public, can_download=mine or can_clip()))
+
+
+@api.get("/reclip/<job_id>")
+@login_required_api
+def reclip_source(job_id):
+    """What "Re-clip" needs to open the editor with a clip's settings.
+
+    For the user's own clips in any state (a failed one can be tried
+    again), and for other users' public clips.
+    """
+    job = reachable_job(job_id)
+    if job is None:
+        return bad_request(NOT_AVAILABLE, 404)
+    return jsonify(
+        id=job.id,
+        item_id=job.item_id,
+        title=job.title,
+        name=job.name,
+        owner_name=job.owner_name,
+        mine=job.user_id == user_id(),
+        mode=job.mode,
+        parts=job.parts_dicts(),
+        # null for clips made before the settings were kept.
+        settings=job.settings or None,
+    )
+
+
 @api.get("/public-clips/<job_id>/download")
 @login_required_api
 def download_public_clip(job_id):

@@ -2,7 +2,7 @@
 // of an earlier clip ("Re-clip"). Pure functions, so they can be unit
 // tested with "bun test".
 import { DEFAULT_CROP_WIDTH } from "../../constants";
-import type { ItemDetails, Job, Source, SubtitleStyle } from "../../types";
+import type { ItemDetails, ReclipSource, Source, SubtitleStyle } from "../../types";
 import { heightChoices, initialOptions, needsPrecise, type ClipOptions } from "./options";
 import { initialParts, withVideoDuration, type ClipParts } from "./parts";
 
@@ -17,9 +17,17 @@ function videoDuration(item: ItemDetails, source: Source): number {
     return source.duration || item.runtime || 0;
 }
 
+// What of a clip is copied.
+export type ClipToCopy = Pick<ReclipSource, "name" | "mode" | "parts" | "settings">;
+
 // sources are the versions of the video that can be clipped (at least one).
 // clip is the clip to copy the settings of, or null for a fresh start.
-export function editorStart(item: ItemDetails, sources: Source[], styles: SubtitleStyle[], clip: Job | null): EditorStart {
+export function editorStart(
+    item: ItemDetails,
+    sources: Source[],
+    styles: SubtitleStyle[],
+    clip: ClipToCopy | null,
+): EditorStart {
     const first = sources[0]!;
     if (!clip) {
         return { options: initialOptions(first, styles), parts: initialParts(videoDuration(item, first)), caveats: [] };

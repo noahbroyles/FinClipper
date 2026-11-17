@@ -27,7 +27,8 @@ interface Props {
     // The options and parts to begin with: the defaults, or those of the
     // clip being re-clipped.
     start: EditorStart;
-    // When re-clipping: the name of that clip, for the note above the options.
+    // When re-clipping: which clip that is, for the note above the options
+    // (for example: your clip "Best bits").
     reclipOf?: string;
 }
 
@@ -128,7 +129,7 @@ export function Editor({ item, sources, start, reclipOf }: Props) {
                 )}
                 {reclipOf === undefined ? null : (
                     <Notice>
-                        {`These are the settings of your clip "${reclipOf}". Change what you like and create a new clip; the original is kept. `}
+                        {`These are the settings of ${reclipOf}. Change what you like and create a new clip; the original is kept. `}
                         {start.caveats.join(" ")}
                     </Notice>
                 )}

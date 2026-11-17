@@ -106,7 +106,7 @@ class StoreTests(StoreTestCase):
         loaded = Job.from_record(self.manager.store.get(job.id))
         self.assertEqual(loaded.settings, settings)
         self.assertEqual(loaded.to_dict()["settings"], settings)
-        # Only the owner gets them: they are for making the clip again.
+        # Not part of the public list; "Re-clip" asks for them separately.
         self.assertNotIn("settings", loaded.to_public_dict("u2"))
 
     def test_owner_view_says_whether_the_browser_can_play_the_clip(self):

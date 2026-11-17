@@ -3,29 +3,37 @@ import { useLoad } from "../../hooks/useLoad";
 import { api } from "../../lib/api";
 import { useMe } from "../../lib/me";
 import { toast } from "../../lib/toast";
-import type { ItemDetails, Job } from "../../types";
+import type { ItemDetails, ReclipSource } from "../../types";
 import { Editor } from "./Editor";
 import { EditorHeader } from "./EditorHeader";
 import { editorStart } from "./reclip";
 
 interface Props {
     itemId: string;
-    // Id of one of the user's clips to start from ("Re-clip"), or "".
+    // Id of the clip to start from ("Re-clip"), or "": one of the user's own
+    // clips or someone else's public clip.
     reclipId: string;
 }
 
-// The clip to copy the settings of. It can be gone (deleted or expired
-// since the link was made), which is not worth failing the page over.
-async function loadReclip(itemId: string, clipId: string): Promise<Job | null> {
+// The clip to copy the settings of. It can be gone (deleted, expired or
+// made private since the link was made), which is not worth failing the
+// page over.
+async function loadReclip(itemId: string, clipId: string): Promise<ReclipSource | null> {
     if (!clipId) return null;
     try {
-        const clip = await api<Job>(`/clips/${clipId}`);
+        const clip = await api<ReclipSource>(`/reclip/${clipId}`);
         if (clip.item_id === itemId) return clip;
     } catch {
         // Reported below.
     }
-    toast("The clip to copy the settings from no longer exists.", true);
+    toast("The clip to copy the settings from is no longer available.", true);
     return null;
+}
+
+// How the note above the options names the clip the settings came from.
+function describeReclip(clip: ReclipSource): string {
+    const name = `"${clip.name || clip.title}"`;
+    return clip.mine ? `your clip ${name}` : `the clip ${name} shared by ${clip.owner_name || "another user"}`;
 }
 
 // The page for one video: the clip editor, or the reason the video cannot
@@ -49,7 +57,7 @@ export function EditorView({ itemId, reclipId }: Props) {
                     item={item}
                     sources={sources}
                     start={editorStart(item, sources, me.subtitle_styles, clip)}
-                    reclipOf={clip ? clip.name || clip.title : undefined}
+                    reclipOf={clip ? describeReclip(clip) : undefined}
                 />
             )}
         </>

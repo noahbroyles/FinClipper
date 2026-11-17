@@ -144,6 +144,29 @@ export interface PublicClip {
     shared_at: number | null;
 }
 
+// A clip as its watch page gets it: the user's own (private or public) or
+// someone else's public one.
+export interface WatchClip extends PublicClip {
+    public: boolean;
+    // Whether this user may watch and download it.
+    can_download: boolean;
+}
+
+// A clip as "Re-clip" gets it, to open the editor with its settings: the
+// user's own, or someone else's public one.
+export interface ReclipSource {
+    id: string;
+    item_id: string;
+    title: string;
+    name: string;
+    owner_name: string | null;
+    mine: boolean;
+    mode: ClipMode;
+    parts: ClipRange[];
+    // null for clips made before the settings were kept.
+    settings: ClipSettings | null;
+}
+
 export interface PublicClipList {
     items: PublicClip[];
     can_download: boolean;

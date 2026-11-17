@@ -39,7 +39,10 @@ export function LoginPage() {
             });
             const data: { error?: string } = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(data.error || `Sign in failed (${response.status})`);
-            window.location.href = BASE;
+            // Someone who opened a link to a page (a shared clip, say) while
+            // signed out is sent here with the "#/..." part of the address
+            // intact; carry it over so they arrive where the link pointed.
+            window.location.href = BASE + window.location.hash;
         } catch (cause) {
             setError(errorMessage(cause));
             setBusy(false);
