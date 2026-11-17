@@ -94,7 +94,7 @@ export function Editor({ item, sources }: Props) {
             <div>
                 <div class="player">
                     <video ref={videoRef} controls playsInline preload="auto" />
-                    {showCropGuide ? <CropGuide videoRef={videoRef} cropX={options.cropX} /> : null}
+                    {showCropGuide ? <CropGuide videoRef={videoRef} cropX={options.cropX} cropWidth={options.cropWidth} /> : null}
                 </div>
                 {previewError ? <div class="notice error player-error">{previewError}</div> : null}
                 <Timeline timing={timing} controls={timingControls} player={player} />

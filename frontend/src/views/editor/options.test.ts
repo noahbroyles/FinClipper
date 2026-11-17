@@ -49,6 +49,8 @@ describe("initialOptions", () => {
             subtitleIndex: null,
             subtitleStyle: "classic",
             layout: "horizontal",
+            cropX: 0.5,
+            cropWidth: 0.35,
             mode: "fast",
             maxHeight: 0,
         });
@@ -176,7 +178,7 @@ describe("clipRequest", () => {
     });
 
     test("sends every choice", () => {
-        const options = set(initial, { layout: "vertical", fit: "blur", cropX: 0.25, subtitleIndex: 3, name: "Clip" });
+        const options = set(initial, { layout: "vertical", fit: "blur", cropX: 0.25, cropWidth: 0.6, subtitleIndex: 3, name: "Clip" });
         expect(clipRequest("item1", source(), options, 12.5, 20)).toEqual({
             item_id: "item1",
             source_id: "src1",
@@ -189,6 +191,7 @@ describe("clipRequest", () => {
             layout: "vertical",
             fit: "blur",
             crop_x: 0.25,
+            crop_width: 0.6,
             subtitle_index: 3,
             subtitle_style: "classic",
         });

@@ -465,7 +465,8 @@ def create_clip():
     except ValueError as exc:
         return bad_request(str(exc))
     # Shape: "horizontal" keeps the source's shape, "vertical" makes a 9:16
-    # phone screen clip framed as "fit" says (crop_x places a crop).
+    # phone screen clip framed as "fit" says (crop_x places a crop and
+    # crop_width says how wide it is, see media.VERTICAL_FITS).
     layout = data.get("layout") or "horizontal"
     if layout not in ("horizontal", "vertical"):
         return bad_request("Layout must be horizontal or vertical")
@@ -476,6 +477,9 @@ def create_clip():
     # NaN and infinity (which Python's JSON parser accepts) fail the range check.
     if isinstance(crop_x, bool) or not isinstance(crop_x, (int, float)) or not 0 <= crop_x <= 1:
         return bad_request("Invalid crop position")
+    crop_width = data.get("crop_width", 0)
+    if isinstance(crop_width, bool) or not isinstance(crop_width, (int, float)) or not 0 <= crop_width <= 1:
+        return bad_request("Invalid crop width")
     # subtitle_index: null or missing means no burned-in subtitles.
     subtitle_index = data.get("subtitle_index")
     if subtitle_index is not None and (isinstance(subtitle_index, bool) or not isinstance(subtitle_index, int)):
@@ -596,6 +600,7 @@ def create_clip():
         layout=layout,
         fit=fit,
         crop_x=float(crop_x),
+        crop_width=float(crop_width),
         subtitle=subtitle,
     )
     # Same command with the token hidden, for logs.
@@ -604,6 +609,9 @@ def create_clip():
     description = plan["description"]
     if layout == "vertical":
         fit_names = {"crop": "cropped", "blur": "blurred background", "bars": "black bars"}
+        if fit == "crop" and crop_width > 0:
+            # A crop wider than the frame does not fill it.
+            fit_names["crop"] = "cropped, black bars"
         description += f", vertical {media.VERTICAL_SIZES[max_height]}x{max_height} ({fit_names[fit]})"
     elif mode == "precise" and max_height:
         description += f", max {max_height}p"

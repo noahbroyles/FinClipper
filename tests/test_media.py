@@ -307,9 +307,21 @@ class PlanAndCommandTests(unittest.TestCase):
         )
         graph = cmd[cmd.index("-filter_complex") + 1]
         self.assertIn(":x='(iw-ow)*0.2500'", graph)
-        self.assertIn("scale=720:1280", graph)
+        # The narrowest crop by default: nothing is added to the 9:16 width.
+        self.assertIn("crop=w='trunc((min(iw,ih*9/16)+(iw-min(iw,ih*9/16))*0.0000)/2)*2'", graph)
+        self.assertIn("scale=w=720:h='min(1280,round(720*ih/iw/2)*2)'", graph)
+        self.assertIn("pad=720:1280:0:(oh-ih)/2:color=black", graph)
         self.assertTrue(graph.endswith("[vout]"))
         self.assertEqual(cmd[cmd.index("[vout]") - 1], "-map")
+
+    def test_vertical_crop_width(self):
+        plan = media.plan_output("precise", self.video, None)
+        cmd = media.build_ffmpeg_command(
+            "/m/in.mkv", 0, 5, self.video, None, "precise", 1280, "/o/x.part", plan,
+            layout="vertical", fit="crop", crop_x=0.5, crop_width=0.35,
+        )
+        graph = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("(iw-min(iw,ih*9/16))*0.3500", graph)
 
     def test_text_subtitle_file_must_be_a_plain_name(self):
         plan = media.plan_output("precise", self.video, None)
@@ -451,12 +463,12 @@ class LayoutAndSubtitleIntegrationTests(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp)
 
-    def run_clip(self, name, layout="horizontal", fit="crop", max_height=0, subtitle=None):
+    def run_clip(self, name, layout="horizontal", fit="crop", max_height=0, subtitle=None, crop_width=0.0):
         plan = media.plan_output("precise", self.video, None)
         out = self.tmp / f"{name}.mp4"
         cmd = media.build_ffmpeg_command(
             self.src, 1.5, 2.5, self.video, None, "precise", max_height, out, plan,
-            preset="ultrafast", layout=layout, fit=fit, subtitle=subtitle,
+            preset="ultrafast", layout=layout, fit=fit, subtitle=subtitle, crop_width=crop_width,
         )
         # The app runs ffmpeg in the clips directory; text subtitle files are
         # referred to by name relative to it.
@@ -492,6 +504,17 @@ class LayoutAndSubtitleIntegrationTests(unittest.TestCase):
         self.assertGreater(self.bright_pixels(path, 1.0, top, bottom), 100)
         self.assertEqual(self.bright_pixels(path, 2.0, top, bottom), 0)
 
+    def picture_rows(self, path, time=1.0):
+        """First and last row of the frame that is not black, at a time."""
+        width, height, _ = self.size(path)
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", str(time), "-i", str(path), "-frames:v", "1",
+             "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+            check=True, capture_output=True,
+        ).stdout
+        lit = [row for row in range(height) if sum(raw[row * width:(row + 1) * width]) / width > 60]
+        return lit[0], lit[-1]
+
     def write_ass(self, name, layout, style="classic"):
         (self.tmp / name).write_text(media.build_ass(self.srt, 1.5, 4.0, style, layout), encoding="utf-8")
         return {"kind": "text", "file": name}
@@ -501,6 +524,20 @@ class LayoutAndSubtitleIntegrationTests(unittest.TestCase):
             with self.subTest(fit=fit):
                 out = self.run_clip(f"vertical-{fit}", layout="vertical", fit=fit, max_height=960)
                 self.assertEqual(self.size(out), (540, 960, "1:1"))
+
+    def test_vertical_crop_width(self):
+        # The 640x360 source in a 540x960 frame. The narrowest crop fills
+        # the frame; wider crops are less tall, with black bars above and
+        # below, down to the whole picture at 540x304.
+        for crop_width, picture_height in ((0.0, 960), (0.5, 462), (1.0, 304)):
+            with self.subTest(crop_width=crop_width):
+                out = self.run_clip(f"crop-width-{crop_width}", "vertical", "crop", 960, crop_width=crop_width)
+                self.assertEqual(self.size(out), (540, 960, "1:1"))
+                first, last = self.picture_rows(out)
+                # The picture is centred; allow a row or two of blending
+                # where it meets the bars.
+                self.assertAlmostEqual(first, (960 - picture_height) / 2, delta=2)
+                self.assertAlmostEqual(last, (960 + picture_height) / 2 - 1, delta=2)
 
     def test_text_subtitles_horizontal(self):
         for style in media.SUBTITLE_STYLES:

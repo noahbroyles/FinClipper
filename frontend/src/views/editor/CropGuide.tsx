@@ -1,11 +1,14 @@
 import type { RefObject } from "preact";
 import { useLayoutEffect, useState } from "preact/hooks";
+import { cropRect } from "./crop";
 
 interface Props {
     // The preview's <video> element, which the guide is drawn over.
     videoRef: RefObject<HTMLVideoElement | null>;
-    // Where the crop sits: 0 is the left edge, 1 the right edge.
+    // Where the crop sits (0 is the left edge, 1 the right edge) and how
+    // wide it is (0 is the narrowest cut, 1 the whole width).
     cropX: number;
+    cropWidth: number;
 }
 
 // Sizes in CSS pixels: the <video> element, and the picture it shows.
@@ -16,10 +19,10 @@ interface Measurements {
     sourceH: number;
 }
 
-// Outline of the 9:16 area a vertical crop keeps, drawn over the preview
-// with the rest dimmed. (Its CSS makes it ignore the pointer, so the video
+// Outline of the area a vertical crop keeps, drawn over the preview with
+// the rest dimmed. (Its CSS makes it ignore the pointer, so the video
 // controls underneath keep working.)
-export function CropGuide({ videoRef, cropX }: Props) {
+export function CropGuide({ videoRef, cropX, cropWidth }: Props) {
     const [size, setSize] = useState<Measurements | null>(null);
 
     useLayoutEffect(() => {
@@ -51,10 +54,7 @@ export function CropGuide({ videoRef, cropX }: Props) {
     const scale = Math.min(size.boxW / size.sourceW, size.boxH / size.sourceH);
     const picW = size.sourceW * scale;
     const picH = size.sourceH * scale;
-    // Same as the crop filter in media.py: the largest 9:16 area, placed
-    // by cropX, and centred vertically in taller pictures.
-    const cropW = Math.min(picW, (picH * 9) / 16);
-    const cropH = Math.min(picH, (picW * 16) / 9);
+    const crop = cropRect(picW, picH, cropX, cropWidth);
 
     return (
         <div
@@ -69,10 +69,10 @@ export function CropGuide({ videoRef, cropX }: Props) {
             <div
                 class="crop-window"
                 style={{
-                    left: `${(picW - cropW) * cropX}px`,
-                    top: `${(picH - cropH) / 2}px`,
-                    width: `${cropW}px`,
-                    height: `${cropH}px`,
+                    left: `${crop.left}px`,
+                    top: `${crop.top}px`,
+                    width: `${crop.width}px`,
+                    height: `${crop.height}px`,
                 }}
             />
         </div>

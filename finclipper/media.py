@@ -29,7 +29,10 @@ ALLOWED_HEIGHTS = {0, 2160, 1440, 1080, 720, 480, 360}
 VERTICAL_SIZES = {1920: 1080, 1280: 720, 960: 540}
 
 # How a horizontal picture is fitted into a vertical frame:
-#   crop  fill the frame and cut off the sides (crop_x picks which part)
+#   crop  cut off the sides (crop_x picks which part is kept). crop_width
+#         says how much is kept: 0 is the narrowest cut, which fills the
+#         frame, and 1 the whole width. Anything wider than the narrowest
+#         cut is shown with black bars above and below.
 #   blur  show the whole picture over a blurred, zoomed copy of itself
 #   bars  show the whole picture with black bars above and below
 VERTICAL_FITS = {"crop", "blur", "bars"}
@@ -563,7 +566,7 @@ def _join(filters):
     return ",".join(filters) or "null"
 
 
-def _video_graph(video, max_height, layout, fit, crop_x, subtitle):
+def _video_graph(video, max_height, layout, fit, crop_x, crop_width, subtitle):
     """Build the -filter_complex graph for a precise (re-encoded) clip.
 
     The graph reads the video stream (and a picture subtitle stream) of
@@ -573,11 +576,12 @@ def _video_graph(video, max_height, layout, fit, crop_x, subtitle):
     2. picture subtitles, drawn at the source resolution, unless the clip
        is a vertical crop (see 4)
     3. resize: horizontal clips scale down to max_height; vertical clips
-       first get square pixels, then are cropped, fitted with a blurred
-       background, or fitted with black bars into the 9:16 frame
+       first get square pixels, then are cropped (and given black bars if
+       the crop is wider than the frame), fitted with a blurred background,
+       or fitted with black bars into the 9:16 frame
     4. vertical crop only: picture subtitles are scaled to the frame width
-       and drawn after the crop, because a centre crop would cut off the
-       ends of most lines
+       and drawn after the crop, because a crop would cut off the ends of
+       most lines
     5. text subtitles (an ASS file made by build_ass) on the final frame
 
     HDR tone mapping runs right after the first resize, so the expensive
@@ -616,14 +620,22 @@ def _video_graph(video, max_height, layout, fit, crop_x, subtitle):
         steps.append("scale=w='trunc(iw*sar/2)*2':h='trunc(ih/2)*2',setsar=1")
         fit_inside = f"scale=w={width}:h={height}:force_original_aspect_ratio=decrease:force_divisible_by=2"
         if fit == "crop":
-            # The largest 9:16 area of the picture; crop_x (0 = left edge,
-            # 1 = right edge) picks where it sits. Taller pictures are
-            # cropped top and bottom instead, around the middle.
+            # "narrow" is the width of the largest 9:16 area of the picture,
+            # which is what fills the frame. crop_width widens the crop from
+            # there (0) to the whole picture (1), and crop_x (0 = left edge,
+            # 1 = right edge) picks where it sits. Pictures taller than 9:16
+            # are cropped top and bottom instead, around the middle.
+            narrow = "min(iw,ih*9/16)"
             steps += [
-                "crop=w='trunc(min(iw,ih*9/16)/2)*2':h='trunc(min(ih,iw*16/9)/2)*2'"
+                f"crop=w='trunc(({narrow}+(iw-{narrow})*{crop_width:.4f})/2)*2':h='trunc(min(ih,iw*16/9)/2)*2'"
                 f":x='(iw-ow)*{crop_x:.4f}':y='(ih-oh)/2'",
-                f"scale={width}:{height}",
+                # Full frame width. A crop wider than 9:16 comes out less
+                # tall than the frame, and pad adds black bars above and
+                # below it. The min() makes the narrowest crop, which is
+                # only 9:16 to the nearest pixel, fill the frame exactly.
+                f"scale=w={width}:h='min({height},round({width}*ih/iw/2)*2)'",
                 *tonemap,
+                f"pad={width}:{height}:0:(oh-ih)/2:color=black",
             ]
         elif fit == "bars":
             steps += [fit_inside, *tonemap, f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"]
@@ -692,6 +704,7 @@ def build_ffmpeg_command(
     layout="horizontal",
     fit="crop",
     crop_x=0.5,
+    crop_width=0.0,
     subtitle=None,
 ):
     """Build the ffmpeg argument list for one clip.
@@ -706,7 +719,8 @@ def build_ffmpeg_command(
     plan         result of plan_output()
     http_headers raw header block sent when source is a URL
     layout       "horizontal" or "vertical" (precise mode only)
-    fit/crop_x   how a vertical clip is framed (see VERTICAL_FITS)
+    fit, crop_x, crop_width
+                 how a vertical clip is framed (see VERTICAL_FITS)
     subtitle     subtitles to burn in (precise mode only), see _video_graph
 
     The command must run with the clips directory as its working directory
@@ -733,7 +747,7 @@ def build_ffmpeg_command(
     if mode == "precise":
         # The filter graph reads the video (and picture subtitle) streams
         # itself; its output pad is mapped like a stream.
-        cmd += ["-filter_complex", _video_graph(video, max_height, layout, fit, crop_x, subtitle), "-map", "[vout]"]
+        cmd += ["-filter_complex", _video_graph(video, max_height, layout, fit, crop_x, crop_width, subtitle), "-map", "[vout]"]
     else:
         cmd += ["-map", f"0:{video['Index']}"]
     if audio is not None:

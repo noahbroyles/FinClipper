@@ -21,7 +21,7 @@ interface Props {
 }
 
 const FITS: Array<{ value: ClipFit; label: string }> = [
-    { value: "crop", label: "Crop to fill the screen" },
+    { value: "crop", label: "Crop the sides" },
     { value: "blur", label: "Whole picture, blurred background" },
     { value: "bars", label: "Whole picture, black bars" },
 ];
@@ -152,6 +152,19 @@ export function OptionsPanel(props: Props) {
                             </option>
                         ))}
                     </select>
+                </Field>
+            ) : null}
+            {/* Both sliders move the outline drawn on the preview (CropGuide). */}
+            {vertical && options.fit === "crop" ? (
+                <Field label="Crop width (wider adds black bars above and below)">
+                    <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={String(Math.round(options.cropWidth * 100))}
+                        onInput={(event) => onChange({ cropWidth: Number(event.currentTarget.value) / 100 })}
+                    />
                 </Field>
             ) : null}
             {vertical && options.fit === "crop" ? (

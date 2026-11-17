@@ -1,6 +1,6 @@
 // The choices in the editor's Options panel and what follows from them.
 // Pure functions, so they can be unit tested with "bun test".
-import { HORIZONTAL_HEIGHTS, MP4_AUDIO_COPY, MP4_VIDEO_COPY, VERTICAL_SIZES } from "../../constants";
+import { DEFAULT_CROP_WIDTH, HORIZONTAL_HEIGHTS, MP4_AUDIO_COPY, MP4_VIDEO_COPY, VERTICAL_SIZES } from "../../constants";
 import type { ClipFit, ClipLayout, ClipMode, Source, SubtitleStyle, SubtitleTrack } from "../../types";
 
 export interface ClipOptions {
@@ -17,6 +17,9 @@ export interface ClipOptions {
     fit: ClipFit;
     // Where a crop sits: 0 is the left edge, 1 the right edge.
     cropX: number;
+    // How wide a crop is: 0 is the narrowest cut, which fills the screen,
+    // and 1 the whole width. Wider cuts get black bars above and below.
+    cropWidth: number;
     mode: ClipMode;
     // Precise mode only. Horizontal: the largest height, 0 for the
     // original. Vertical: the output height (see VERTICAL_SIZES).
@@ -44,6 +47,7 @@ export function initialOptions(source: Source, styles: SubtitleStyle[]): ClipOpt
         layout: "horizontal",
         fit: "crop",
         cropX: 0.5,
+        cropWidth: DEFAULT_CROP_WIDTH,
         mode: "fast",
         maxHeight: 0,
         name: "",
@@ -131,6 +135,7 @@ export function clipRequest(itemId: string, source: Source, options: ClipOptions
         layout: options.layout,
         fit: options.fit,
         crop_x: options.cropX,
+        crop_width: options.cropWidth,
         subtitle_index: options.subtitleIndex,
         subtitle_style: options.subtitleStyle,
     };

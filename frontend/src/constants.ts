@@ -17,6 +17,12 @@ export const VERTICAL_SIZES: ReadonlyArray<readonly [height: number, width: numb
     [960, 540],
 ];
 
+// How wide a vertical crop starts out, between the narrowest cut that fills
+// the screen (0) and the whole width of the picture (1). At 0.35 a 16:9
+// video is cut to roughly a square, which keeps a little over half of its
+// width.
+export const DEFAULT_CROP_WIDTH = 0.35;
+
 // Maximum heights offered for horizontal clips in Precise mode (only those
 // below the source height are shown). Must be in ALLOWED_HEIGHTS.
 export const HORIZONTAL_HEIGHTS = [2160, 1440, 1080, 720, 480, 360];
