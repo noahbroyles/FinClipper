@@ -240,6 +240,37 @@ def subtitle_streams(source):
     ]
 
 
+def file_stream_index(source, stream):
+    """Index of an embedded stream inside the media file itself, for ffmpeg.
+
+    MediaStream.Index is the stream's place in Jellyfin's list for the
+    media source, and that list also holds external files (subtitle or
+    audio files next to the video). When one of those is listed before the
+    embedded streams, every Index after it is one higher than the stream's
+    index in the file, and ffmpeg would read the wrong stream or find none.
+    Jellyfin's own ffmpeg calls count the embedded streams listed before
+    the one they want (EncodingHelper.FindIndex); this does the same.
+    """
+    position = 0
+    for other in source.get("MediaStreams") or []:
+        if other.get("Index") == stream.get("Index"):
+            return position
+        if not other.get("IsExternal"):
+            position += 1
+    raise ValueError("The stream is not part of this media source")
+
+
+def for_ffmpeg(source, stream):
+    """A copy of an embedded stream whose Index is its index in the file.
+
+    The functions that build ffmpeg commands and filter graphs take their
+    streams in this form (see file_stream_index). Returns None for None.
+    """
+    if stream is None:
+        return None
+    return dict(stream, Index=file_stream_index(source, stream))
+
+
 def default_audio_index(source):
     """Pick the audio stream Jellyfin would play by default."""
     streams = audio_streams(source)
@@ -634,7 +665,7 @@ def _video_graph(video, max_height, layout, fit, crop_x, crop_width, subtitle):
     input 0 and ends in the [vout] pad. See _part_graph for the steps.
     subtitle is None, {"kind": "text", "file": name} with the ASS file name
     relative to ffmpeg's working directory, or {"kind": "bitmap", "index": n}
-    with the stream index in the input file.
+    with the stream's index in the input file (see file_stream_index).
     """
     bitmap = subtitle if subtitle and subtitle["kind"] == "bitmap" else None
     text = subtitle if subtitle and subtitle["kind"] == "text" else None
@@ -834,7 +865,8 @@ def build_ffmpeg_command(
     source       local file path or http(s) URL of the original file
     start        clip start in seconds
     duration     clip length in seconds
-    video/audio  Jellyfin MediaStream dicts (audio may be None)
+    video/audio  Jellyfin MediaStream dicts (audio may be None) whose Index
+                 is the stream's index in the file, see for_ffmpeg()
     mode         "fast" (stream copy) or "precise" (re-encode)
     max_height   horizontal: output height limit for precise mode, 0 for
                  original; vertical: the output height (a VERTICAL_SIZES key)

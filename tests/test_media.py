@@ -298,6 +298,50 @@ class SubtitleTests(unittest.TestCase):
         self.assertEqual((style[1], style[15], style[16]), ("DejaVu Sans", "3", "11.8"))
 
 
+class FileStreamIndexTests(unittest.TestCase):
+    """Jellyfin's stream numbers against the stream's place in the file."""
+
+    def test_same_as_jellyfin_index_without_external_files(self):
+        source = {"MediaStreams": [
+            {"Type": "Video", "Index": 0},
+            {"Type": "Audio", "Index": 1},
+            {"Type": "Subtitle", "Index": 2},
+        ]}
+        for stream in source["MediaStreams"]:
+            self.assertEqual(media.file_stream_index(source, stream), stream["Index"])
+
+    def test_external_file_listed_first_shifts_the_rest(self):
+        # A subtitle file next to the video, listed before the embedded
+        # streams: the file itself only has streams 0 (video) and 1 (audio).
+        source = {"MediaStreams": [
+            {"Type": "Subtitle", "Index": 0, "IsExternal": True},
+            {"Type": "Video", "Index": 1, "Codec": "h264"},
+            {"Type": "Audio", "Index": 2, "Codec": "aac"},
+        ]}
+        video, audio = source["MediaStreams"][1:]
+        self.assertEqual(media.file_stream_index(source, video), 0)
+        self.assertEqual(media.file_stream_index(source, audio), 1)
+        # for_ffmpeg copies the stream; Jellyfin's own number is untouched.
+        self.assertEqual(media.for_ffmpeg(source, audio), {"Type": "Audio", "Index": 1, "Codec": "aac"})
+        self.assertEqual(audio["Index"], 2)
+        self.assertIsNone(media.for_ffmpeg(source, None))
+
+    def test_external_files_between_and_after_embedded_streams(self):
+        source = {"MediaStreams": [
+            {"Type": "Video", "Index": 0},
+            {"Type": "Audio", "Index": 1, "IsExternal": True},
+            {"Type": "Audio", "Index": 2},
+            {"Type": "Subtitle", "Index": 3, "IsExternal": True},
+            {"Type": "Subtitle", "Index": 4},
+        ]}
+        embedded = [stream for stream in source["MediaStreams"] if not stream.get("IsExternal")]
+        self.assertEqual([media.file_stream_index(source, stream) for stream in embedded], [0, 1, 2])
+
+    def test_stream_from_another_source(self):
+        with self.assertRaises(ValueError):
+            media.file_stream_index({"MediaStreams": [{"Index": 0}]}, {"Index": 7})
+
+
 class PathMapTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

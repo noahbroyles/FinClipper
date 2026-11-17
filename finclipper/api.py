@@ -574,7 +574,7 @@ def create_clip():
     prepare = None
     if subtitle_stream is not None and media.subtitle_kind(subtitle_stream) == "bitmap":
         # Picture subtitles are read by ffmpeg straight from the input.
-        subtitle = {"kind": "bitmap", "index": subtitle_index}
+        subtitle = {"kind": "bitmap", "index": media.file_stream_index(source, subtitle_stream)}
     elif subtitle_stream is not None:
         # Text subtitles are fetched and turned into an ASS file by the job
         # worker before ffmpeg starts; the filter graph names that file.
@@ -586,6 +586,10 @@ def create_clip():
         )
 
     plan = media.plan_output(mode, video, audio)
+    # ffmpeg needs each stream's index in the file, which is not always the
+    # Index Jellyfin gives it (see media.file_stream_index).
+    video = media.for_ffmpeg(source, video)
+    audio = media.for_ffmpeg(source, audio)
     options = dict(
         video=video,
         audio=audio,
